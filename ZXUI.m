@@ -475,10 +475,6 @@ static void ZXStyleNavBar(UINavigationBar *bar)
     }
 }
 
-static UIColor *ZXAccentText(void) { return [UIColor colorWithRed:0.02 green:0.38 blue:0.28 alpha:1]; } // 6.8:1 on white
-
-
-
 @interface ZXSettingsViewController : UITableViewController <UIImagePickerControllerDelegate, UINavigationControllerDelegate>
 @property (nonatomic, strong) NSArray<NSDictionary *> *sections;
 @property (nonatomic, strong) NSMutableSet<NSIndexPath *> *shownRows;
