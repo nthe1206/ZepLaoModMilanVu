@@ -1,4 +1,4 @@
-# 🌙 Zép Lào Mod của MilanVu
+# 🌙 NTHE
 
 **Tweak Theos cho Zalo iOS** — bản port lấy cảm hứng từ [ZaloXposed](https://github.com/ElectroHeavenVN/ZaloXposed) (Android), viết lại hoàn toàn bằng Objective-C runtime cho `vn.com.vng.zingalo`.
 

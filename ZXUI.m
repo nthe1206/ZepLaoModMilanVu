@@ -289,43 +289,64 @@ static void ZXNoteTabBarInteraction(UIView *bar); // resets the auto-collapse id
 {
     self = [super initWithStyle:style reuseIdentifier:rid];
     if (self) {
+        if (@available(iOS 13.0, *)) self.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
+        if (@available(iOS 14.0, *)) {
+            self.automaticallyUpdatesBackgroundConfiguration = NO;
+            self.backgroundConfiguration = [UIBackgroundConfiguration clearConfiguration];
+        }
         self.contentView.backgroundColor = UIColor.clearColor;
         self.layer.cornerRadius = 18;
         if (@available(iOS 13.0, *)) self.layer.cornerCurve = kCACornerCurveContinuous;
         self.layer.masksToBounds = YES;
         self.selectedBackgroundView = [UIView new];
-        self.selectedBackgroundView.backgroundColor = [UIColor colorWithRed:0.05 green:0.55 blue:0.40 alpha:0.14];
-        self.textLabel.textColor = [UIColor colorWithWhite:0.08 alpha:1];                 // ~17:1 on the card
+        self.selectedBackgroundView.backgroundColor = [UIColor colorWithRed:0.10 green:0.75 blue:0.55 alpha:0.25];
+        self.textLabel.backgroundColor = UIColor.clearColor;
+        self.textLabel.textColor = UIColor.whiteColor;
         self.textLabel.font = [UIFontMetrics.defaultMetrics scaledFontForFont:[UIFont systemFontOfSize:17 weight:UIFontWeightSemibold]];
         self.textLabel.adjustsFontForContentSizeCategory = YES;
-        self.detailTextLabel.textColor = [UIColor colorWithWhite:0.33 alpha:1];           // ~7:1 on the card
+        self.detailTextLabel.backgroundColor = UIColor.clearColor;
+        self.detailTextLabel.textColor = [UIColor colorWithWhite:0.90 alpha:1.0];
         self.detailTextLabel.font = [UIFontMetrics.defaultMetrics scaledFontForFont:[UIFont systemFontOfSize:13]];
         self.detailTextLabel.adjustsFontForContentSizeCategory = YES;
         [self applyCardStyle];
     }
     return self;
 }
-/// UITableView resets cell.backgroundColor right before display, so this is called again from willDisplayCell.
-/// Liquid Glass on: UIGlassEffect behind the row, white text. Off (or Reduce Transparency): near-opaque white card, dark text.
+/// UITableView resets cell.backgroundColor right before display, so this is called again from willDisplayCell and layoutSubviews.
+/// Always uses a dark high-contrast card background so white title/subtitle text stays crisp and never turns white-on-white.
 - (void)applyCardStyle
 {
+    if (@available(iOS 14.0, *)) {
+        self.automaticallyUpdatesBackgroundConfiguration = NO;
+        self.backgroundConfiguration = [UIBackgroundConfiguration clearConfiguration];
+    }
+    self.contentView.backgroundColor = UIColor.clearColor;
+    self.textLabel.backgroundColor = UIColor.clearColor;
+    self.detailTextLabel.backgroundColor = UIColor.clearColor;
     if (ZXGlassOn()) {
-        self.backgroundColor = UIColor.clearColor;
+        self.backgroundColor = [UIColor colorWithRed:0.06 green:0.10 blue:0.18 alpha:0.68];
         if (![self.backgroundView isKindOfClass:[UIVisualEffectView class]]) {
             UIVisualEffectView *ev = [[UIVisualEffectView alloc] initWithEffect:ZXGlassEffect()];
+            ev.backgroundColor = [UIColor colorWithRed:0.06 green:0.10 blue:0.18 alpha:0.55];
+            ev.contentView.backgroundColor = [UIColor colorWithRed:0.06 green:0.10 blue:0.18 alpha:0.45];
             ev.layer.cornerRadius = 18;
             if (@available(iOS 13.0, *)) ev.layer.cornerCurve = kCACornerCurveContinuous;
             ev.clipsToBounds = YES;
             self.backgroundView = ev;
         }
-        self.textLabel.textColor = UIColor.whiteColor;
-        self.detailTextLabel.textColor = [UIColor colorWithWhite:1 alpha:0.82];
     } else {
         self.backgroundView = nil;
-        self.backgroundColor = [UIColor colorWithWhite:1 alpha:ZXReduceTransparency() ? 1.0 : 0.92];
-        self.textLabel.textColor = [UIColor colorWithWhite:0.08 alpha:1];
-        self.detailTextLabel.textColor = [UIColor colorWithWhite:0.33 alpha:1];
+        self.backgroundColor = [UIColor colorWithRed:0.08 green:0.13 blue:0.22 alpha:0.94];
     }
+    self.textLabel.textColor = UIColor.whiteColor;
+    self.detailTextLabel.textColor = [UIColor colorWithWhite:0.90 alpha:1.0];
+}
+- (void)layoutSubviews
+{
+    [super layoutSubviews];
+    self.contentView.backgroundColor = UIColor.clearColor;
+    self.textLabel.textColor = UIColor.whiteColor;
+    self.detailTextLabel.textColor = [UIColor colorWithWhite:0.90 alpha:1.0];
 }
 - (void)setFrame:(CGRect)frame
 {
@@ -515,7 +536,7 @@ static UIColor *ZXAccentText(void) { return [UIColor colorWithRed:0.02 green:0.3
 {
     [super viewDidLoad];
     self.shownRows = [NSMutableSet new];
-    if (@available(iOS 13.0, *)) self.overrideUserInterfaceStyle = UIUserInterfaceStyleLight;
+    if (@available(iOS 13.0, *)) self.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
     [self buildBackground];
     self.tableView.backgroundColor = UIColor.clearColor;
     self.tableView.separatorStyle = UITableViewCellSeparatorStyleNone;
@@ -590,7 +611,7 @@ static UIColor *ZXAccentText(void) { return [UIColor colorWithRed:0.02 green:0.3
     UILabel *l = [[UILabel alloc] initWithFrame:CGRectMake(20, 8, tv.bounds.size.width - 40, 60)];
     l.numberOfLines = 0;
     l.textAlignment = NSTextAlignmentCenter;
-    l.text = @"Zép Lào Mod của MilanVu\nDựa trên ZaloXposed của ElectroHeavenVN (AGPL-3.0)";
+    l.text = @"NTHE\nDựa trên ZaloXposed của ElectroHeavenVN (AGPL-3.0)";
     l.font = [UIFont systemFontOfSize:12 weight:UIFontWeightMedium];
     l.textColor = [UIColor colorWithWhite:1 alpha:0.85];
     UIView *v = [[UIView alloc] initWithFrame:CGRectMake(0, 0, tv.bounds.size.width, 80)];
@@ -793,10 +814,10 @@ static UIVisualEffect *ZXGlassEffect(void)
     if (gc) {
         id e = [[gc alloc] init];
         @try { [e setValue:@YES forKey:@"interactive"]; } @catch (__unused id x) {}
-        @try { [e setValue:[UIColor colorWithWhite:0 alpha:0.32] forKey:@"tintColor"]; } @catch (__unused id x) {} // keeps white text ≥ 4.5:1
+        @try { [e setValue:[UIColor colorWithRed:0.05 green:0.09 blue:0.16 alpha:0.72] forKey:@"tintColor"]; } @catch (__unused id x) {} // keeps white text high contrast
         return e;
     }
-    return [UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThinMaterialDark];
+    return [UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThickMaterialDark];
 }
 
 static BOOL ZXGlassOn(void) { return [ZXConfig boolForKey:ZXK_LIQUID_GLASS] && !ZXReduceTransparency(); }
@@ -853,36 +874,44 @@ static UIBarButtonItem *ZXGlassBarButton(NSString *title, BOOL bold, id target, 
 {
     self = [super initWithFrame:frame];
     if (!self) return nil;
-    self.contentView.backgroundColor = [UIColor colorWithWhite:1 alpha:ZXReduceTransparency() ? 1.0 : 0.92];
+    if (@available(iOS 13.0, *)) self.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
+    if (@available(iOS 14.0, *)) {
+        self.automaticallyUpdatesBackgroundConfiguration = NO;
+        self.backgroundConfiguration = [UIBackgroundConfiguration clearConfiguration];
+    }
+    self.backgroundColor = UIColor.clearColor;
+    self.contentView.backgroundColor = [UIColor colorWithRed:0.08 green:0.13 blue:0.22 alpha:0.94];
     self.contentView.layer.cornerRadius = 22;
     if (@available(iOS 13.0, *)) self.contentView.layer.cornerCurve = kCACornerCurveContinuous;
     self.contentView.layer.masksToBounds = YES;
 
     _iconBG = [UIView new];
-    _iconBG.backgroundColor = [UIColor colorWithRed:0.05 green:0.55 blue:0.40 alpha:0.14];
+    _iconBG.backgroundColor = [UIColor colorWithRed:0.10 green:0.75 blue:0.55 alpha:0.28];
     _iconBG.layer.cornerRadius = 22;
     _icon = [UIImageView new];
-    _icon.tintColor = ZXAccentText();
+    _icon.tintColor = UIColor.whiteColor;
     _icon.contentMode = UIViewContentModeScaleAspectFit;
 
     _badge = [UILabel new];
     _badge.font = [UIFontMetrics.defaultMetrics scaledFontForFont:[UIFont systemFontOfSize:13 weight:UIFontWeightSemibold]];
     _badge.adjustsFontForContentSizeCategory = YES;
-    _badge.textColor = ZXAccentText();
+    _badge.textColor = UIColor.whiteColor;
     _badge.textAlignment = NSTextAlignmentCenter;
-    _badge.backgroundColor = [UIColor colorWithRed:0.05 green:0.55 blue:0.40 alpha:0.14];
+    _badge.backgroundColor = [UIColor colorWithRed:0.10 green:0.75 blue:0.55 alpha:0.32];
     _badge.layer.cornerRadius = 12;
     _badge.layer.masksToBounds = YES;
 
     _title = [UILabel new];
     _title.font = [UIFontMetrics.defaultMetrics scaledFontForFont:[UIFont systemFontOfSize:17 weight:UIFontWeightSemibold]];
     _title.adjustsFontForContentSizeCategory = YES;
-    _title.textColor = [UIColor colorWithWhite:0.08 alpha:1];
+    _title.textColor = UIColor.whiteColor;
+    _title.backgroundColor = UIColor.clearColor;
     _title.numberOfLines = 2;
     _sub = [UILabel new];
     _sub.font = [UIFontMetrics.defaultMetrics scaledFontForFont:[UIFont systemFontOfSize:13]];
     _sub.adjustsFontForContentSizeCategory = YES;
-    _sub.textColor = [UIColor colorWithWhite:0.33 alpha:1];
+    _sub.textColor = [UIColor colorWithWhite:0.90 alpha:1.0];
+    _sub.backgroundColor = UIColor.clearColor;
     _sub.numberOfLines = 2;
 
     for (UIView *v in @[_iconBG, _icon, _badge, _title, _sub]) {
@@ -917,32 +946,33 @@ static UIBarButtonItem *ZXGlassBarButton(NSString *title, BOOL bold, id target, 
 }
 - (void)applyStyleGlass:(BOOL)glass
 {
+    if (@available(iOS 14.0, *)) {
+        self.automaticallyUpdatesBackgroundConfiguration = NO;
+        self.backgroundConfiguration = [UIBackgroundConfiguration clearConfiguration];
+    }
+    self.backgroundColor = UIColor.clearColor;
     if (glass) {
         if (!_glass) {
             _glass = [[UIVisualEffectView alloc] initWithEffect:ZXGlassEffect()];
             _glass.frame = self.contentView.bounds;
             _glass.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
             _glass.userInteractionEnabled = NO;
+            _glass.backgroundColor = [UIColor colorWithRed:0.06 green:0.10 blue:0.18 alpha:0.55];
+            _glass.contentView.backgroundColor = [UIColor colorWithRed:0.06 green:0.10 blue:0.18 alpha:0.45];
             [self.contentView insertSubview:_glass atIndex:0];
         }
         _glass.hidden = NO;
-        self.contentView.backgroundColor = UIColor.clearColor;
-        _title.textColor = UIColor.whiteColor;
-        _sub.textColor = [UIColor colorWithWhite:1 alpha:0.86];
-        _icon.tintColor = UIColor.whiteColor;
-        _iconBG.backgroundColor = [UIColor colorWithWhite:1 alpha:0.22];
-        _badge.textColor = UIColor.whiteColor;
-        _badge.backgroundColor = [UIColor colorWithWhite:1 alpha:0.22];
+        self.contentView.backgroundColor = [UIColor colorWithRed:0.06 green:0.10 blue:0.18 alpha:0.68];
     } else {
         _glass.hidden = YES;
-        self.contentView.backgroundColor = [UIColor colorWithWhite:1 alpha:ZXReduceTransparency() ? 1.0 : 0.92];
-        _title.textColor = [UIColor colorWithWhite:0.08 alpha:1];
-        _sub.textColor = [UIColor colorWithWhite:0.33 alpha:1];
-        _icon.tintColor = ZXAccentText();
-        _iconBG.backgroundColor = [UIColor colorWithRed:0.05 green:0.55 blue:0.40 alpha:0.14];
-        _badge.textColor = ZXAccentText();
-        _badge.backgroundColor = [UIColor colorWithRed:0.05 green:0.55 blue:0.40 alpha:0.14];
+        self.contentView.backgroundColor = [UIColor colorWithRed:0.08 green:0.13 blue:0.22 alpha:0.94];
     }
+    _title.textColor = UIColor.whiteColor;
+    _sub.textColor = [UIColor colorWithWhite:0.90 alpha:1.0];
+    _icon.tintColor = UIColor.whiteColor;
+    _iconBG.backgroundColor = [UIColor colorWithRed:0.10 green:0.75 blue:0.55 alpha:0.28];
+    _badge.textColor = UIColor.whiteColor;
+    _badge.backgroundColor = [UIColor colorWithRed:0.10 green:0.75 blue:0.55 alpha:0.32];
 }
 - (void)configureWithCategory:(NSDictionary *)cat
 {
@@ -999,7 +1029,7 @@ static NSString *ZXFold(NSString *t)
 - (void)viewDidLoad
 {
     [super viewDidLoad];
-    self.title = @"Zép Lào Mod";
+    self.title = @"NTHE";
     // Liquid Glass starts ON once; after that the user's choice in "Giao diện" is respected
     if (![ZXConfig boolForKey:@"lg_default_applied"]) {
         [ZXConfig setBool:YES forKey:ZXK_LIQUID_GLASS];
@@ -1008,7 +1038,7 @@ static NSString *ZXFold(NSString *t)
     self.cats = ZXCategories();
     self.shown = [NSMutableSet new];
     self.view.backgroundColor = [UIColor colorWithRed:0.08 green:0.16 blue:0.34 alpha:1];
-    if (@available(iOS 13.0, *)) self.overrideUserInterfaceStyle = UIUserInterfaceStyleLight;
+    if (@available(iOS 13.0, *)) self.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
     [self refreshBackdrop];
 
     UICollectionViewFlowLayout *layout = [UICollectionViewFlowLayout new];
@@ -1238,7 +1268,7 @@ static void ZXAddSettingsButton(UIViewController *vc)
     UIButton *b = [UIButton buttonWithType:UIButtonTypeSystem];
     b.frame = CGRectMake(16, oldH + 14, width - 32, 48);
     b.autoresizingMask = UIViewAutoresizingFlexibleWidth;
-    [b setTitle:@"Zép Lào Mod của MilanVu" forState:UIControlStateNormal];
+    [b setTitle:@"NTHE" forState:UIControlStateNormal];
     b.titleLabel.font = [UIFont boldSystemFontOfSize:16];
     b.backgroundColor = [UIColor colorWithRed:0.0 green:0.45 blue:1.0 alpha:0.12];
     b.layer.cornerRadius = 10;
