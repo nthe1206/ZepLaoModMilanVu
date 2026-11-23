@@ -9,5 +9,6 @@ TWEAK_NAME = ZaloXposediOS
 ZaloXposediOS_FILES = Tweak.m ZXConfig.m ZXLog.m ZXHookEngine.m ZXAntiRecall.m ZXNetwork.m ZXScanner.m ZXUI.m ZXRecallMarker.m ZXBubble.m ZXBubbleIcon.m
 ZaloXposediOS_CFLAGS = -fobjc-arc -Wno-deprecated-declarations
 ZaloXposediOS_FRAMEWORKS = UIKit Foundation LocalAuthentication AVFoundation
+ZaloXposediOS_LIBRARIES = sqlite3
 
 include $(THEOS_MAKE_PATH)/tweak.mk

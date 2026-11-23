@@ -5,4 +5,5 @@
 @interface ZXScanner : NSObject
 + (NSString *)runScan;   // returns path of scan.txt
 + (NSString *)scanPath;
++ (NSArray<NSDictionary *> *)scanSQLiteForHiddenChats;
 @end

@@ -10,6 +10,8 @@
 #import <AVFoundation/AVFoundation.h>
 #import <objc/runtime.h>
 
+#define ZX_MOD_VERSION @"v1.2"
+
 // ---------------------------------------------------------------- theme palette
 
 static UIColor *ZXColorBgPrimary(void)   { return [UIColor colorWithRed:0.051 green:0.059 blue:0.071 alpha:1.0]; } // #0D0F12
@@ -45,6 +47,78 @@ static UIViewController *ZXTopVC(void)
 {
     UIViewController *v = ZXKeyWindow().rootViewController;
     while (v.presentedViewController) v = v.presentedViewController;
+    return v;
+}
+
+/// Shows a sleek bottom Toast confirmation badge on any view controller.
+static void ZXShowToast(UIView *hostView, NSString *message)
+{
+    UIView *parent = hostView ?: ZXKeyWindow();
+    if (!parent || message.length == 0) return;
+    UIView *old = [parent viewWithTag:0x544F4153];
+    if (old) [old removeFromSuperview];
+
+    UILabel *lbl = [UILabel new];
+    lbl.text = message;
+    lbl.textColor = UIColor.whiteColor;
+    lbl.font = [UIFont systemFontOfSize:13 weight:UIFontWeightBold];
+    lbl.textAlignment = NSTextAlignmentCenter;
+    lbl.numberOfLines = 2;
+
+    CGFloat maxW = parent.bounds.size.width - 48.0;
+    CGSize sz = [lbl sizeThatFits:CGSizeMake(maxW - 28.0, 60.0)];
+    CGFloat boxW = MIN(maxW, MAX(180.0, ceil(sz.width) + 28.0));
+    CGFloat boxH = MAX(38.0, ceil(sz.height) + 16.0);
+
+    UIView *toast = [[UIView alloc] initWithFrame:CGRectMake((parent.bounds.size.width - boxW) / 2.0,
+                                                             parent.bounds.size.height - boxH - 46.0,
+                                                             boxW, boxH)];
+    toast.tag = 0x544F4153;
+    toast.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin | UIViewAutoresizingFlexibleRightMargin | UIViewAutoresizingFlexibleTopMargin;
+    toast.backgroundColor = [UIColor colorWithRed:0.12 green:0.14 blue:0.18 alpha:0.96];
+    toast.layer.cornerRadius = boxH / 2.0;
+    toast.layer.borderWidth = 1.2;
+    toast.layer.borderColor = ZXColorZaloRed().CGColor;
+    toast.userInteractionEnabled = NO;
+
+    lbl.frame = CGRectInset(toast.bounds, 12, 6);
+    [toast addSubview:lbl];
+    toast.alpha = 0;
+    toast.transform = CGAffineTransformMakeTranslation(0, 14);
+    [parent addSubview:toast];
+
+    [UIView animateWithDuration:0.22 animations:^{
+        toast.alpha = 1.0;
+        toast.transform = CGAffineTransformIdentity;
+    } completion:^(BOOL f) {
+        (void)f;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.6 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            [UIView animateWithDuration:0.25 animations:^{
+                toast.alpha = 0;
+            } completion:^(BOOL done) {
+                (void)done;
+                [toast removeFromSuperview];
+            }];
+        });
+    }];
+}
+
+static UIView *ZXMakeVersionTitleView(void)
+{
+    UIView *v = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 180, 40)];
+    UILabel *mainLbl = [[UILabel alloc] initWithFrame:CGRectMake(0, 2, 180, 20)];
+    mainLbl.text = @"thanhthe";
+    mainLbl.textAlignment = NSTextAlignmentCenter;
+    mainLbl.textColor = UIColor.whiteColor;
+    mainLbl.font = [UIFont systemFontOfSize:17 weight:UIFontWeightHeavy];
+    [v addSubview:mainLbl];
+
+    UILabel *subLbl = [[UILabel alloc] initWithFrame:CGRectMake(0, 22, 180, 15)];
+    subLbl.text = [NSString stringWithFormat:@"thanhthe Mod • %@", ZX_MOD_VERSION];
+    subLbl.textAlignment = NSTextAlignmentCenter;
+    subLbl.textColor = ZXColorNavTint();
+    subLbl.font = [UIFont systemFontOfSize:11 weight:UIFontWeightBold];
+    [v addSubview:subLbl];
     return v;
 }
 
@@ -261,7 +335,7 @@ static void ZXRefreshFloatingBubbleNow(void)
     CGFloat sz = (CGFloat)[ZXConfig bubbleSize];
     UIImage *logo = ZXCurrentFloatingLogo(CGSizeMake(sz, sz));
     for (UIWindow *w in UIApplication.sharedApplication.windows) {
-        if (w.windowLevel < UIWindowLevelAlert + 50) continue;
+        if (w.windowLevel < UIWindowLevelAlert + 50 || w.windowLevel >= UIWindowLevelStatusBar + 90) continue;
         UIView *root = w.rootViewController.view;
         if (!root || root.subviews.count == 0) continue;
         CGRect b = w.windowScene ? w.windowScene.coordinateSpace.bounds : UIScreen.mainScreen.bounds;
@@ -345,10 +419,7 @@ static void ZXHookBubbleShow(void)
 - (void)copyAll
 {
     [UIPasteboard generalPasteboard].string = self.textView.text ?: @"";
-    UIAlertController *a = [UIAlertController alertControllerWithTitle:@"Đã sao chép" message:@"Dán vào chat hoặc trình sửa văn bản." preferredStyle:UIAlertControllerStyleAlert];
-    if (@available(iOS 13.0, *)) a.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
-    [a addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
-    [self presentViewController:a animated:YES completion:nil];
+    ZXShowToast(self.view, @"Đã sao chép vào bộ nhớ tạm");
 }
 - (void)save
 {
@@ -378,7 +449,7 @@ static void ZXHookBubbleShow(void)
     self.title = @"Trò chuyện đang ẩn";
     self.tableView.backgroundColor = ZXColorBgPrimary();
     self.tableView.separatorColor = ZXColorCardBorder();
-    self.navigationItem.rightBarButtonItem = ZXMakeNavButton(@"arrow.clockwise.circle.fill", @"Quét lại", ZXColorZaloRed(), self, @selector(reloadChats));
+    self.navigationItem.rightBarButtonItem = ZXMakeNavButton(@"arrow.clockwise.circle.fill", @"Quét lại", ZXColorZaloRed(), self, @selector(rescanAndReload));
     [self reloadChats];
 }
 - (void)viewWillAppear:(BOOL)animated
@@ -391,6 +462,12 @@ static void ZXHookBubbleShow(void)
     [ZXHookEngine scanMemoryForHiddenChats];
     self.chats = [ZXHookEngine discoveredHiddenChats] ?: @[];
     [self.tableView reloadData];
+}
+- (void)rescanAndReload
+{
+    [self reloadChats];
+    ZXShowToast(self.navigationController.view ?: self.view,
+                [NSString stringWithFormat:@"Đã quét SQLite & RAM: %lu hội thoại ẩn", (unsigned long)self.chats.count]);
 }
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section
 {
@@ -412,7 +489,7 @@ static void ZXHookBubbleShow(void)
     }
     if (self.chats.count == 0) {
         cell.textLabel.text = @"Chưa phát hiện cuộc trò chuyện ẩn nào";
-        cell.detailTextLabel.text = @"Hãy bật 'Tạm hiện tất cả chat bị ẩn', cuộn danh sách chat Zalo rồi bấm 'Quét lại'.";
+        cell.detailTextLabel.text = @"Bấm nút 'Quét lại' ở góc phải để quét cơ sở dữ liệu SQLite của Zalo.";
         cell.accessoryType = UITableViewCellAccessoryNone;
         return cell;
     }
@@ -444,6 +521,7 @@ static void ZXHookBubbleShow(void)
         (void)act;
         [ZXHookEngine unhideChatWithID:uid];
         [self reloadChats];
+        ZXShowToast(self.navigationController.view ?: self.view, @"Đã bỏ ẩn hội thoại");
     }]];
     [sheet addAction:[UIAlertAction actionWithTitle:@"Đóng" style:UIAlertActionStyleCancel handler:nil]];
     sheet.popoverPresentationController.sourceView = [tableView cellForRowAtIndexPath:indexPath];
@@ -495,6 +573,7 @@ static void ZXHookBubbleShow(void)
             [ZXConfig addLockedChatWithID:val name:val];
             [ZXConfig setBool:YES forKey:ZXK_CHAT_LOCK_ENABLED];
             [self reloadList];
+            ZXShowToast(self.navigationController.view ?: self.view, [NSString stringWithFormat:@"Đã khóa: %@", val]);
         }
     }]];
     [self presentViewController:a animated:YES completion:nil];
@@ -533,6 +612,7 @@ static void ZXHookBubbleShow(void)
     NSString *cid = [d[@"id"] description] ?: @"";
     [ZXConfig removeLockedChatWithID:cid];
     [self reloadList];
+    ZXShowToast(self.navigationController.view ?: self.view, [NSString stringWithFormat:@"Đã mở khóa: %@", cid]);
 }
 @end
 
@@ -571,6 +651,8 @@ static void ZXHookBubbleShow(void)
     [ZXHookEngine toggleManualCallRecording];
     [self updateNavBtn];
     [self reloadFiles];
+    ZXShowToast(self.navigationController.view ?: self.view,
+                [ZXHookEngine isCallRecording] ? @"Đang ghi âm (.m4a)..." : @"Đã lưu bản ghi âm");
 }
 - (void)reloadFiles
 {
@@ -632,6 +714,7 @@ static void ZXHookBubbleShow(void)
         self.player = [[AVAudioPlayer alloc] initWithContentsOfURL:url error:nil];
         [self.player prepareToPlay];
         [self.player play];
+        ZXShowToast(self.navigationController.view ?: self.view, [NSString stringWithFormat:@"Đang phát: %@", fn]);
     }]];
     [sheet addAction:[UIAlertAction actionWithTitle:@"📤 Chia sẻ / Lưu tệp .m4a" style:UIAlertActionStyleDefault handler:^(UIAlertAction *act) {
         (void)act;
@@ -644,6 +727,7 @@ static void ZXHookBubbleShow(void)
         (void)act;
         [[NSFileManager defaultManager] removeItemAtPath:path error:nil];
         [self reloadFiles];
+        ZXShowToast(self.navigationController.view ?: self.view, @"Đã xóa bản ghi âm");
     }]];
     [sheet addAction:[UIAlertAction actionWithTitle:@"Đóng" style:UIAlertActionStyleCancel handler:nil]];
     sheet.popoverPresentationController.sourceView = [tableView cellForRowAtIndexPath:indexPath];
@@ -670,8 +754,8 @@ static NSArray<NSDictionary *> *ZXFiveCategories(void)
             @"icon": @"eye.slash.fill",
             @"color": @(0x3B82F6),
             @"items": @[
-                @{ @"key": ZXK_UNHIDE_CHATS, @"title": @"Tạm hiện tất cả chat bị ẩn", @"sub": @"Quét property/ivar ẩn hội thoại và trả về NO để hiện trên danh sách chính", @"icon": @"eye.circle.fill", @"color": @(0x10B981), @"kw": @"tam hien chat an hidden conversation" },
-                @{ @"action": @"hidden_chats_list", @"title": @"Danh sách trò chuyện đang ẩn", @"sub": @"Xác thực Face ID / PIN để xem tên, UID, tin cuối và mở thẳng chat ẩn", @"icon": @"list.bullet.rectangle.portrait.fill", @"color": @(0x14B8A6), @"kw": @"danh sach tro chuyen dang an hidden list" },
+                @{ @"key": ZXK_UNHIDE_CHATS, @"title": @"Tạm hiện tất cả chat bị ẩn", @"sub": @"Quét SQLite & RAM ẩn hội thoại và trả về NO để hiện trên danh sách chính", @"icon": @"eye.circle.fill", @"color": @(0x10B981), @"kw": @"tam hien chat an hidden conversation" },
+                @{ @"action": @"hidden_chats_list", @"title": @"Danh sách trò chuyện đang ẩn", @"sub": @"Xác thực Face ID / PIN để quét SQLite, xem tên, UID, tin cuối và mở thẳng chat", @"icon": @"list.bullet.rectangle.portrait.fill", @"color": @(0x14B8A6), @"kw": @"danh sach tro chuyen dang an hidden list" },
                 @{ @"key": ZXK_CHAT_LOCK_ENABLED, @"title": @"Khóa phòng chat tự chọn (Face ID / PIN)", @"sub": @"Che mờ & yêu cầu Face ID / Mật khẩu khi mở phòng chat đã khóa", @"icon": @"lock.shield.fill", @"color": @(0xE53935), @"kw": @"khoa phong chat faceid pin lock" },
                 @{ @"action": @"set_lock_pin", @"title": @"Đặt / Đổi mã PIN dự phòng (4 số)", @"sub": @"Dùng để mở khóa chat và xem danh sách chat ẩn khi không dùng Face ID", @"icon": @"key.fill", @"color": @(0xF59E0B), @"kw": @"ma pin 4 so du phong" },
                 @{ @"action": @"locked_chats_list", @"title": @"Danh sách chat bị khóa", @"sub": @"Thêm/xóa phòng chat cần khóa (hoặc nhấn giữ hội thoại ở danh sách chat)", @"icon": @"lock.rectangle.stack.fill", @"color": @(0xEF4444), @"kw": @"danh sach chat bi khoa locked" },
@@ -686,8 +770,8 @@ static NSArray<NSDictionary *> *ZXFiveCategories(void)
             @"icon": @"paperplane.fill",
             @"color": @(0xE53935),
             @"items": @[
-                @{ @"key": ZXK_MSG_REPEATER, @"title": @"Nút Spam nổi trên bàn phím (xN)", @"sub": @"Tự hiện nút đỏ ↻ xN ngay phía trên bàn phím khi mở khung chat Zalo", @"icon": @"repeat.circle.fill", @"color": @(0xE53935), @"kw": @"gui tin nhan lap lai repeater spam delay" },
-                @{ @"action": @"open_repeater", @"title": @"Mở bảng Gửi tin nhắn lặp lại", @"sub": @"Chọn nhanh 5/10/20/50 lần, tốc độ 0.3s/0.8s/1.5s và gửi vào phòng chat vừa mở", @"icon": @"paperplane.circle.fill", @"color": @(0xF97316), @"kw": @"mo bang gui tin lap lai spam" },
+                @{ @"key": ZXK_MSG_REPEATER, @"title": @"Nút Spam nổi trên bàn phím (↻ xN)", @"sub": @"Hiện nút đỏ ↻ xN ở tầng cửa sổ cao nhất ngay phía trên bàn phím Zalo", @"icon": @"repeat.circle.fill", @"color": @(0xE53935), @"kw": @"gui tin nhan lap lai repeater spam delay" },
+                @{ @"action": @"open_repeater", @"title": @"Mở bảng Gửi tin nhắn lặp lại", @"sub": @"Chọn nhanh 5/10/20/50 lần, tốc độ 0.3s/0.8s/1.5s, chống trùng tin", @"icon": @"paperplane.circle.fill", @"color": @(0xF97316), @"kw": @"mo bang gui tin lap lai spam" },
                 @{ @"key": ZXK_ANTI_RECALL, @"title": @"Chống thu hồi tin nhắn", @"sub": @"Tin vẫn hiển thị trong khung chat khi đối phương thu hồi", @"icon": @"shield.checkered", @"color": @(0x10B981), @"kw": @"anti recall chong thu hoi" },
                 @{ @"key": ZXK_SHOW_CONTENT, @"title": @"Hiện nội dung tin bị thu hồi/xóa", @"sub": @"Lưu tạm nội dung tin nhắn nhận được trên thiết bị", @"icon": @"text.bubble.fill", @"color": @(0x14B8A6), @"kw": @"noi dung thu hoi xoa" },
                 @{ @"key": ZXK_RECALL_NOTE, @"title": @"Đánh dấu nhãn \"đã thu hồi\"", @"sub": @"Hiện ghi chú nhỏ trong bong bóng tin nhắn được giữ lại", @"icon": @"tag.fill", @"color": @(0x059669), @"kw": @"nhan label da thu hoi" },
@@ -1085,7 +1169,7 @@ static NSString *ZXFoldText(NSString *t)
 
 @interface ZXFeatureListViewController : UIViewController <UITableViewDataSource, UITableViewDelegate, UITextFieldDelegate, UIImagePickerControllerDelegate, UINavigationControllerDelegate>
 @property (nonatomic, strong) NSArray<NSDictionary *> *allCategories;
-@property (nonatomic, strong) NSDictionary *singleCategory; // non-nil when presented as Popup Sheet
+@property (nonatomic, strong) NSDictionary *singleCategory;
 @property (nonatomic, copy) void (^onDismissCallback)(void);
 @property (nonatomic, strong) NSArray<NSDictionary *> *searchResults;
 @property (nonatomic, assign) BOOL isSearching;
@@ -1107,6 +1191,7 @@ static NSString *ZXFoldText(NSString *t)
         self.navigationItem.rightBarButtonItem = ZXMakeNavButton(@"xmark.circle.fill", @"Đóng", ZXColorNavTint(), self, @selector(closeSheet));
     } else {
         self.title = @"thanhthe";
+        self.navigationItem.titleView = ZXMakeVersionTitleView();
         self.navigationItem.leftBarButtonItem = ZXMakeNavButton(@"xmark.circle.fill", @"Đóng", ZXColorNavTint(), self, @selector(closeMenu));
         self.navigationItem.rightBarButtonItem = ZXMakeNavButton(@"arrow.clockwise.circle.fill", @"Khởi động lại", ZXColorNavTint(), self, @selector(restartZalo));
     }
@@ -1125,10 +1210,18 @@ static NSString *ZXFoldText(NSString *t)
     [self.tableView registerClass:[ZXModernRowCell class] forCellReuseIdentifier:@"ZXModernRowCell"];
 
     if (!self.singleCategory) {
-        UIView *searchHeader = [[UIView alloc] initWithFrame:CGRectMake(0, 0, self.view.bounds.size.width, 62)];
+        UIView *searchHeader = [[UIView alloc] initWithFrame:CGRectMake(0, 0, self.view.bounds.size.width, 82)];
         searchHeader.backgroundColor = ZXColorBgPrimary();
 
-        UIView *searchBox = [[UIView alloc] initWithFrame:CGRectMake(16, 10, self.view.bounds.size.width - 32, 42)];
+        UILabel *verBanner = [[UILabel alloc] initWithFrame:CGRectMake(16, 4, self.view.bounds.size.width - 32, 18)];
+        verBanner.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+        verBanner.text = [NSString stringWithFormat:@"thanhthe Mod • %@ (Zalo iOS 26.11.02.1)", ZX_MOD_VERSION];
+        verBanner.textAlignment = NSTextAlignmentCenter;
+        verBanner.textColor = ZXColorTextSub();
+        verBanner.font = [UIFont systemFontOfSize:11.5 weight:UIFontWeightBold];
+        [searchHeader addSubview:verBanner];
+
+        UIView *searchBox = [[UIView alloc] initWithFrame:CGRectMake(16, 28, self.view.bounds.size.width - 32, 42)];
         searchBox.autoresizingMask = UIViewAutoresizingFlexibleWidth;
         searchBox.backgroundColor = ZXColorCardBg();
         searchBox.layer.cornerRadius = 12.0;
@@ -1277,7 +1370,7 @@ static NSString *ZXFoldText(NSString *t)
 {
     (void)tableView;
     if (!self.singleCategory && !self.isSearching) {
-        return 1; // 5 Category Cards in 1 clean list
+        return 1;
     }
     return [self activeFeatureSections].count;
 }
@@ -1321,8 +1414,8 @@ static NSString *ZXFoldText(NSString *t)
     UILabel *l = [[UILabel alloc] initWithFrame:CGRectMake(20, 10, tableView.bounds.size.width - 40, 44)];
     l.numberOfLines = 0;
     l.textAlignment = NSTextAlignmentCenter;
-    l.text = @"thanhthe • Giao diện tối giản độ tương phản cao\nDựa trên ZaloXposed của ElectroHeavenVN (AGPL-3.0)";
-    l.font = [UIFont systemFontOfSize:11.5 weight:UIFontWeightMedium];
+    l.text = [NSString stringWithFormat:@"thanhthe Mod • %@\nDựa trên ZaloXposed của ElectroHeavenVN (AGPL-3.0)", ZX_MOD_VERSION];
+    l.font = [UIFont systemFontOfSize:11.5 weight:UIFontWeightBold];
     l.textColor = ZXColorTextSub();
     [v addSubview:l];
     return v;
@@ -1336,14 +1429,12 @@ static NSString *ZXFoldText(NSString *t)
 
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath
 {
-    // Main Screen mode: render the 5 Category Cards
     if (!self.singleCategory && !self.isSearching) {
         ZXCategoryCardCell *card = [tableView dequeueReusableCellWithIdentifier:@"ZXCategoryCardCell" forIndexPath:indexPath];
         [card configureWithCategory:self.allCategories[indexPath.row]];
         return card;
     }
 
-    // Popup Sheet or Search mode: render feature row
     ZXModernRowCell *cell = [tableView dequeueReusableCellWithIdentifier:@"ZXModernRowCell" forIndexPath:indexPath];
     NSDictionary *item = [self activeFeatureSections][indexPath.section][@"items"][indexPath.row];
 
@@ -1451,6 +1542,9 @@ static NSString *ZXFoldText(NSString *t)
     } else if ([key isEqualToString:ZXK_UNHIDE_CHATS] && sw.on) {
         [ZXHookEngine scanMemoryForHiddenChats];
     }
+    NSString *title = item[@"title"] ?: key;
+    ZXShowToast(self.navigationController.view ?: self.view,
+                [NSString stringWithFormat:@"%@: %@", title, (sw.on ? @"ĐÃ BẬT" : @"ĐÃ TẮT")]);
 }
 
 - (void)bubbleSliderChanged:(UISlider *)slider
@@ -1493,6 +1587,7 @@ static NSString *ZXFoldText(NSString *t)
         [ZXBubble show];
         ZXRefreshFloatingBubbleNow();
         [self.tableView reloadData];
+        ZXShowToast(self.navigationController.view ?: self.view, @"Đã cập nhật ảnh nút nổi mới");
     }];
 }
 
@@ -1508,7 +1603,7 @@ static NSString *ZXFoldText(NSString *t)
     [ZXBubble show];
     ZXRefreshFloatingBubbleNow();
     [self.tableView reloadData];
-    [self showAlert:@"Đã khôi phục" message:@"Nút nổi đã chuyển về Logo Zalo Đỏ (#E53935) mặc định."];
+    ZXShowToast(self.navigationController.view ?: self.view, @"Đã khôi phục Logo Zalo Đỏ mặc định");
 }
 
 // ---------------------------------------------------------------- Row Actions & Alerts
@@ -1551,7 +1646,6 @@ static NSString *ZXFoldText(NSString *t)
 {
     [tableView deselectRowAtIndexPath:indexPath animated:YES];
 
-    // Main screen category card tap -> open Popup Sheet
     if (!self.singleCategory && !self.isSearching) {
         NSDictionary *cat = self.allCategories[indexPath.row];
         [self openCategoryPopup:cat];
@@ -1578,6 +1672,7 @@ static NSString *ZXFoldText(NSString *t)
                 NSString *clean = [t stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
                 [ZXConfig setChatLockPIN:clean];
                 [weakSelf.tableView reloadData];
+                ZXShowToast(weakSelf.navigationController.view ?: weakSelf.view, @"Đã lưu mã PIN bảo mật");
             }];
         });
     } else if ([action isEqualToString:@"locked_chats_list"]) {
@@ -1603,6 +1698,8 @@ static NSString *ZXFoldText(NSString *t)
                 [ZXConfig setVoicePlaybackRate:r];
                 [ZXConfig setBool:YES forKey:ZXK_VOICE_MSG_TOOLS];
                 [weakSelf.tableView reloadData];
+                ZXShowToast(weakSelf.navigationController.view ?: weakSelf.view,
+                            [NSString stringWithFormat:@"Đã đặt tốc độ thoại %.1fx", r]);
             }]];
         }
         NSURL *lastURL = [ZXHookEngine lastVoiceMessageURL];
@@ -1622,11 +1719,13 @@ static NSString *ZXFoldText(NSString *t)
         [self promptInput:@"User ID Zalo của bạn" currentText:[ZXConfig currentUserID] numeric:YES completion:^(NSString *t) {
             [ZXConfig setCurrentUserID:[t stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet]];
             [weakSelf.tableView reloadData];
+            ZXShowToast(weakSelf.navigationController.view ?: weakSelf.view, @"Đã lưu User ID");
         }];
     } else if ([action isEqualToString:@"ttl"]) {
         [self promptInput:@"Giá trị TTL (ms)" currentText:[NSString stringWithFormat:@"%lld", [ZXConfig ttl]] numeric:YES completion:^(NSString *t) {
             [ZXConfig setTTL:t.longLongValue];
             [weakSelf.tableView reloadData];
+            ZXShowToast(weakSelf.navigationController.view ?: weakSelf.view, @"Đã lưu thời gian tự hủy (TTL)");
         }];
     } else if ([action isEqualToString:@"tabbaridle"]) {
         [self promptInput:@"Tự thu gọn sau (giây), 0 = tắt"
@@ -1635,8 +1734,10 @@ static NSString *ZXFoldText(NSString *t)
                completion:^(NSString *t) {
             [ZXConfig setTabBarIdleSeconds:MAX(0, t.doubleValue)];
             [weakSelf.tableView reloadData];
+            ZXShowToast(weakSelf.navigationController.view ?: weakSelf.view, @"Đã lưu thời gian thu gọn thanh tab");
         }];
     } else if ([action isEqualToString:@"scan"]) {
+        ZXShowToast(self.navigationController.view ?: self.view, @"Đang quét runtime Zalo...");
         dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
             [ZXScanner runScan];
             dispatch_async(dispatch_get_main_queue(), ^{
@@ -1676,10 +1777,10 @@ static NSString *ZXFoldText(NSString *t)
         [self pushTextViewer:(t ?: @"(Chưa có tin nhắn nào bị thu hồi/xóa)") editable:NO title:@"Lịch sử thu hồi" onSave:nil];
     } else if ([action isEqualToString:@"clearmarks"]) {
         [ZXRecallMarker clearMarks];
-        [self showAlert:@"Đã xóa" message:@"Đã xóa danh sách tin đánh dấu thu hồi."];
+        ZXShowToast(self.navigationController.view ?: self.view, @"Đã xóa danh sách tin đánh dấu");
     } else if ([action isEqualToString:@"clearcache"]) {
         [ZXAntiRecall clearCache];
-        [self showAlert:@"Đã xóa" message:@"Bộ nhớ đệm tin nhắn đã được dọn sạch."];
+        ZXShowToast(self.navigationController.view ?: self.view, @"Đã xóa bộ nhớ đệm tin nhắn");
     } else if ([action isEqualToString:@"log"]) {
         NSString *t = [NSString stringWithContentsOfFile:ZXLogPath() encoding:NSUTF8StringEncoding error:nil];
         [self pushTextViewer:(t ?: @"(Trống)") editable:NO title:@"log.txt" onSave:nil];
@@ -1732,7 +1833,7 @@ static void ZXAddSettingsButton(UIViewController *vc)
     UIButton *b = [UIButton buttonWithType:UIButtonTypeSystem];
     b.frame = CGRectMake(16, oldH + 14, width - 32, 48);
     b.autoresizingMask = UIViewAutoresizingFlexibleWidth;
-    [b setTitle:@"thanhthe" forState:UIControlStateNormal];
+    [b setTitle:[NSString stringWithFormat:@"thanhthe • %@", ZX_MOD_VERSION] forState:UIControlStateNormal];
     [b setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
     b.titleLabel.font = [UIFont boldSystemFontOfSize:16];
     b.backgroundColor = ZXColorZaloRed();

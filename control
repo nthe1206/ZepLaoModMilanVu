@@ -1,7 +1,7 @@
 Package: com.nthe.zeplaomod.ios
 Name: NTHE
 Depends: mobilesubstrate
-Version: 1.0.0
+Version: 1.2.0
 Architecture: iphoneos-arm
 Description: Port of ZaloXposed to iOS: anti-recall/delete, hide seen/typing, block ads/tracking, TTL override.
 Maintainer: NTHE
