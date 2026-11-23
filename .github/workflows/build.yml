@@ -8,15 +8,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Setup Theos & iOS Toolchain
+      - name: Install Theos Automatically
         run: |
-          sudo apt-get update && sudo apt-get install -y fakeroot dpkg-dev make perl git curl unzip xz-utils
-          git clone --recursive https://github.com/theos/theos.git ~/theos
-          mkdir -p ~/theos/toolchain ~/theos/sdks
-          curl -L https://github.com/sbingner/llvm-project/releases/latest/download/linux-ios-arm64e-clang-toolchain.tar.lzma -o toolchain.tar.lzma
-          tar --lzma -xf toolchain.tar.lzma -C ~/theos/toolchain/
-          curl -L https://github.com/theos/sdks/archive/master.zip -o sdks.zip
-          unzip -q sdks.zip && mv sdks-master/*.sdk ~/theos/sdks/
+          sudo apt-get update && sudo apt-get install -y fakeroot dpkg-dev make perl git curl unzip
+          bash -c "$(curl -fsSL https://raw.githubusercontent.com/theos/theos/master/bin/install-theos.sh)"
       - name: Build rootless
         run: make package FINALPACKAGE=1 THEOS=~/theos THEOS_PACKAGE_SCHEME=rootless
       - uses: actions/upload-artifact@v4
