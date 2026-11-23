@@ -26,6 +26,7 @@
 + (void)scanMemoryForHiddenChats;
 + (BOOL)unhideChatWithID:(NSString *)chatID;
 + (BOOL)openChatWithID:(NSString *)chatID;
++ (BOOL)openChatWithID:(NSString *)chatID displayName:(NSString *)displayName;
 + (NSURL *)lastVoiceMessageURL;
 + (BOOL)isCallRecording;
 + (void)toggleManualCallRecording;

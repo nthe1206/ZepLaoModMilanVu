@@ -6,4 +6,6 @@
 + (NSString *)runScan;   // returns path of scan.txt
 + (NSString *)scanPath;
 + (NSArray<NSDictionary *> *)scanSQLiteForHiddenChats;
++ (BOOL)unhideChatInSQLiteWithID:(NSString *)chatID;
++ (BOOL)isGarbageChatIdentifier:(NSString *)str;
 @end

@@ -14,6 +14,7 @@ typedef uintptr_t ZXWord;
 static NSMutableSet<NSString *> *gInstalled;
 static NSMutableArray<NSDictionary *> *gPending;
 static NSMutableDictionary<NSString *, NSDictionary *> *gHiddenChatsMap;
+static NSMutableSet<NSString *> *sUnhiddenThreadIDs;
 static NSMutableSet<NSString *> *gUnlockedSessionChats;
 static NSURL *gLastVoiceURL;
 static AVAudioRecorder *gCallRecorder;
@@ -116,6 +117,8 @@ static void ZXInitHiddenChatsStore(void)
     dispatch_once(&onceToken, ^{
         gHiddenChatsMap = [NSMutableDictionary new];
         gUnlockedSessionChats = [NSMutableSet new];
+        NSArray *savedUnhidden = [[NSUserDefaults standardUserDefaults] arrayForKey:@"nthe_unhidden_thread_ids"];
+        sUnhiddenThreadIDs = [NSMutableSet setWithArray:(savedUnhidden ?: @[])];
         @try {
             NSData *d = [NSData dataWithContentsOfFile:ZXHiddenChatsStorePath()];
             if (d) {
@@ -123,7 +126,12 @@ static void ZXInitHiddenChatsStore(void)
                 if ([arr isKindOfClass:[NSArray class]]) {
                     for (NSDictionary *item in arr) {
                         NSString *uid = [item[@"uid"] description];
-                        if (uid.length) gHiddenChatsMap[uid] = item;
+                        NSString *name = [item[@"name"] description];
+                        if (uid.length == 0 || [ZXScanner isGarbageChatIdentifier:uid] || [ZXScanner isGarbageChatIdentifier:name]) {
+                            continue;
+                        }
+                        if ([sUnhiddenThreadIDs containsObject:uid]) continue;
+                        gHiddenChatsMap[uid] = item;
                     }
                 }
             }
@@ -1706,6 +1714,65 @@ static BOOL ZXWordArgType(char c)
 
 // ---- Extended Public API --------------------------------------------------
 
+static void ZXReloadAllZaloTableViewsInView(UIView *v)
+{
+    if (!v) return;
+    @try {
+        if ([v isKindOfClass:[UITableView class]]) {
+            [(UITableView *)v reloadData];
+        }
+        for (UIView *sub in v.subviews) {
+            ZXReloadAllZaloTableViewsInView(sub);
+        }
+    } @catch (__unused NSException *e) {}
+}
+
+static UISearchBar *ZXFindSearchBarInView(UIView *v)
+{
+    if (!v || v.hidden || v.alpha < 0.05) return nil;
+    if ([v isKindOfClass:[UISearchBar class]]) return (UISearchBar *)v;
+    for (UIView *sub in v.subviews) {
+        UISearchBar *found = ZXFindSearchBarInView(sub);
+        if (found) return found;
+    }
+    return nil;
+}
+
+static UITextField *ZXFindSearchTextFieldInView(UIView *v)
+{
+    if (!v || v.hidden || v.alpha < 0.05) return nil;
+    if ([v isKindOfClass:[UITextField class]]) {
+        UITextField *tf = (UITextField *)v;
+        NSString *ph = (tf.placeholder ?: tf.attributedPlaceholder.string ?: @"").lowercaseString;
+        if ([ph containsString:@"tìm"] || [ph containsString:@"search"] || tf.bounds.origin.y < 180) {
+            return tf;
+        }
+    }
+    for (UIView *sub in v.subviews) {
+        UITextField *found = ZXFindSearchTextFieldInView(sub);
+        if (found) return found;
+    }
+    return nil;
+}
+
+static UIControl *ZXFindTopSearchTriggerButton(UIView *v, UIWindow *win)
+{
+    if (!v || !win || v.hidden || v.alpha < 0.05) return nil;
+    if ([v isKindOfClass:[UIControl class]]) {
+        CGRect r = [v convertRect:v.bounds toView:win];
+        NSString *acc = (v.accessibilityLabel ?: @"").lowercaseString;
+        if (r.origin.y >= 20 && r.origin.y <= 140 &&
+            ([acc containsString:@"tìm"] || [acc containsString:@"search"] || r.size.width > 120)) {
+            return (UIControl *)v;
+        }
+    }
+    for (UIView *sub in v.subviews) {
+        UIControl *found = ZXFindTopSearchTriggerButton(sub, win);
+        if (found) return found;
+    }
+    return nil;
+}
+
 + (void)scanMemoryForHiddenChats
 {
     if (gSQLiteScanInProgress) return;
@@ -1714,14 +1781,18 @@ static BOOL ZXWordArgType(char c)
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         @try {
             NSArray<NSDictionary *> *sqlHits = [ZXScanner scanSQLiteForHiddenChats];
-            if (sqlHits.count > 0) {
-                @synchronized (gHiddenChatsMap) {
-                    for (NSDictionary *item in sqlHits) {
-                        NSString *uid = [item[@"uid"] description];
-                        if (uid.length) gHiddenChatsMap[uid] = item;
+            @synchronized (gHiddenChatsMap) {
+                [gHiddenChatsMap removeAllObjects];
+                for (NSDictionary *item in sqlHits) {
+                    NSString *uid = [item[@"uid"] description];
+                    NSString *name = [item[@"name"] description];
+                    if (uid.length == 0 || [ZXScanner isGarbageChatIdentifier:uid] || [ZXScanner isGarbageChatIdentifier:name]) {
+                        continue;
                     }
-                    ZXSaveHiddenChatsStore();
+                    if ([sUnhiddenThreadIDs containsObject:uid]) continue;
+                    gHiddenChatsMap[uid] = item;
                 }
+                ZXSaveHiddenChatsStore();
             }
         } @catch (NSException *e) {
             ZXLog(@"background SQLite scan exception: %@", e.reason);
@@ -1746,23 +1817,131 @@ static BOOL ZXWordArgType(char c)
     if (chatID.length == 0) return NO;
     ZXInitHiddenChatsStore();
     @synchronized (gHiddenChatsMap) {
+        [sUnhiddenThreadIDs addObject:chatID];
+        [[NSUserDefaults standardUserDefaults] setObject:sUnhiddenThreadIDs.allObjects forKey:@"nthe_unhidden_thread_ids"];
         [gHiddenChatsMap removeObjectForKey:chatID];
         ZXSaveHiddenChatsStore();
     }
     [ZXConfig setBool:YES forKey:ZXK_UNHIDE_CHATS];
+
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        [ZXScanner unhideChatInSQLiteWithID:chatID];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            UIWindow *win = ZXActiveWindow();
+            if (win) ZXReloadAllZaloTableViewsInView(win);
+            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZXHiddenChatsUpdatedNotification" object:nil];
+        });
+    });
     return YES;
 }
 
 + (BOOL)openChatWithID:(NSString *)chatID
 {
-    if (chatID.length == 0) return NO;
+    return [self openChatWithID:chatID displayName:nil];
+}
+
++ (BOOL)openChatWithID:(NSString *)chatID displayName:(NSString *)displayName
+{
+    if (chatID.length == 0 && displayName.length == 0) return NO;
     @try {
-        NSURL *deepLink = [NSURL URLWithString:[NSString stringWithFormat:@"zalo://conversation?id=%@", chatID]];
-        if (deepLink && [[UIApplication sharedApplication] canOpenURL:deepLink]) {
-            [[UIApplication sharedApplication] openURL:deepLink options:@{} completionHandler:nil];
+        NSString *cleanDigits = [[(chatID ?: @"") componentsSeparatedByCharactersInSet:
+                                 [[NSCharacterSet decimalDigitCharacterSet] invertedSet]] componentsJoinedByString:@""];
+        NSString *uidArg = (cleanDigits.length >= 5) ? cleanDigits : (chatID ?: @"");
+
+        // (a) Try direct open-chat selectors on Zalo's view controllers & singleton managers
+        NSMutableArray *candidates = [NSMutableArray new];
+        UIWindow *win = ZXActiveWindow();
+        UIViewController *root = win.rootViewController;
+        if (root) {
+            [candidates addObject:root];
+            if ([root isKindOfClass:[UITabBarController class]]) {
+                UITabBarController *tbc = (UITabBarController *)root;
+                tbc.selectedIndex = 0;
+                for (UIViewController *vc in tbc.viewControllers) {
+                    [candidates addObject:vc];
+                    if ([vc isKindOfClass:[UINavigationController class]]) {
+                        for (UIViewController *child in ((UINavigationController *)vc).viewControllers) {
+                            [candidates addObject:child];
+                        }
+                    }
+                }
+            } else if ([root isKindOfClass:[UINavigationController class]]) {
+                for (UIViewController *child in ((UINavigationController *)root).viewControllers) {
+                    [candidates addObject:child];
+                }
+            }
+        }
+        for (NSString *mgrName in @[@"ChatUIManager", @"ZAChatUIManager", @"ZANavigationManager", @"NavigationManager", @"ZARouter", @"ChatDataManager"]) {
+            Class c = NSClassFromString(mgrName);
+            if (!c) continue;
+            [candidates addObject:c];
+            for (NSString *sName in @[@"sharedInstance", @"sharedManager", @"defaultManager", @"shared"]) {
+                SEL s = NSSelectorFromString(sName);
+                if ([c respondsToSelector:s]) {
+                    @try {
+                        id inst = ((id (*)(id, SEL))[c methodForSelector:s])(c, s);
+                        if (inst) [candidates addObject:inst];
+                    } @catch (__unused NSException *e) {}
+                }
+            }
+        }
+
+        NSArray<NSString *> *openSelectors = @[
+            @"openChatWithUserId:", @"openChatWithThreadId:", @"openConversationWithId:",
+            @"navigateToChatWithUid:", @"openChatWithId:", @"openChatViewWithUserId:",
+            @"pushChatViewControllerWithThreadId:", @"startChatWithUserId:"
+        ];
+        for (id target in candidates) {
+            for (NSString *selStr in openSelectors) {
+                SEL sel = NSSelectorFromString(selStr);
+                if ([target respondsToSelector:sel]) {
+                    @try {
+                        ((void (*)(id, SEL, id))[target methodForSelector:sel])(target, sel, uidArg);
+                        ZXLog(@"openChatWithID invoked -[%@ %@] with %@", NSStringFromClass([target class]), selStr, uidArg);
+                        return YES;
+                    } @catch (__unused NSException *e) {}
+                }
+            }
+        }
+
+        // (b) Fallback: Activate Zalo's Search Bar on the Messages tab & auto-fill the real Display Name (or ID / PIN)
+        NSString *query = displayName ?: @"";
+        if (query.length == 0 || [query hasPrefix:@"UID:"] || [query hasPrefix:@"Hội thoại"]) {
+            query = uidArg;
+        }
+        if (win) {
+            UIControl *searchTrigger = ZXFindTopSearchTriggerButton(win, win);
+            if (searchTrigger) {
+                [searchTrigger sendActionsForControlEvents:UIControlEventTouchUpInside];
+            }
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                @try {
+                    UISearchBar *sb = ZXFindSearchBarInView(win);
+                    if (sb) {
+                        [sb becomeFirstResponder];
+                        sb.text = query;
+                        if ([sb.delegate respondsToSelector:@selector(searchBar:textDidChange:)]) {
+                            [sb.delegate searchBar:sb textDidChange:query];
+                        }
+                        return;
+                    }
+                    UITextField *tf = ZXFindSearchTextFieldInView(win);
+                    if (tf) {
+                        [tf becomeFirstResponder];
+                        tf.text = query;
+                        [tf sendActionsForControlEvents:UIControlEventEditingChanged];
+                        [[NSNotificationCenter defaultCenter] postNotificationName:UITextFieldTextDidChangeNotification object:tf];
+                        return;
+                    }
+                    // Also copy to pasteboard so the user can paste immediately if Zalo uses a custom search trigger
+                    [UIPasteboard generalPasteboard].string = query;
+                } @catch (__unused NSException *e) {}
+            });
             return YES;
         }
-    } @catch (__unused NSException *e) {}
+    } @catch (NSException *e) {
+        ZXLog(@"openChatWithID exception: %@", e.reason);
+    }
     return NO;
 }
 

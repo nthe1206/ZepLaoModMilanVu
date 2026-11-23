@@ -519,20 +519,38 @@ static void ZXHookBubbleShow(void)
     NSString *name = [c[@"name"] description] ?: uid;
 
     UIAlertController *sheet = [UIAlertController alertControllerWithTitle:name
-                                                                   message:[NSString stringWithFormat:@"UID: %@", uid]
+                                                                   message:[NSString stringWithFormat:@"UID: %@\n%@", uid, c[@"lastMessage"] ?: @""]
                                                             preferredStyle:UIAlertControllerStyleActionSheet];
     if (@available(iOS 13.0, *)) sheet.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
     [sheet addAction:[UIAlertAction actionWithTitle:@"💬 Mở thẳng khung chat" style:UIAlertActionStyleDefault handler:^(UIAlertAction *act) {
         (void)act;
-        [self dismissViewControllerAnimated:YES completion:^{
-            [ZXHookEngine openChatWithID:uid];
+        // Walk all the way up the thanhthe modal stack so every popup/sheet and main menu closes cleanly
+        UIViewController *rootMod = self;
+        while (rootMod.presentingViewController) {
+            UIViewController *p = rootMod.presentingViewController;
+            NSString *pCls = NSStringFromClass([p class]);
+            BOOL isMod = [pCls hasPrefix:@"ZX"] || ([p isKindOfClass:[UINavigationController class]] &&
+                [NSStringFromClass([((UINavigationController *)p).viewControllers.firstObject class]) hasPrefix:@"ZX"]);
+            rootMod = p;
+            if (!isMod) break;
+        }
+        [rootMod dismissViewControllerAnimated:YES completion:^{
+            [ZXBubble show];
+            ZXRefreshFloatingBubbleNow();
+            [ZXHookEngine openChatWithID:uid displayName:name];
         }];
     }]];
     [sheet addAction:[UIAlertAction actionWithTitle:@"👁️ Bỏ ẩn nhanh hội thoại này" style:UIAlertActionStyleDefault handler:^(UIAlertAction *act) {
         (void)act;
         [ZXHookEngine unhideChatWithID:uid];
         [self reloadChats];
-        ZXShowToast(self.navigationController.view ?: self.view, @"Đã bỏ ẩn hội thoại");
+        ZXShowToast(self.navigationController.view ?: self.view,
+                    [NSString stringWithFormat:@"Đã bỏ ẩn %@ & cập nhật danh sách Tin nhắn", name]);
+    }]];
+    [sheet addAction:[UIAlertAction actionWithTitle:@"📋 Sao chép Tên & UID" style:UIAlertActionStyleDefault handler:^(UIAlertAction *act) {
+        (void)act;
+        [UIPasteboard generalPasteboard].string = ([name hasPrefix:@"UID:"] ? uid : name);
+        ZXShowToast(self.navigationController.view ?: self.view, @"Đã sao chép vào bộ nhớ tạm");
     }]];
     [sheet addAction:[UIAlertAction actionWithTitle:@"Đóng" style:UIAlertActionStyleCancel handler:nil]];
     sheet.popoverPresentationController.sourceView = [tableView cellForRowAtIndexPath:indexPath];
