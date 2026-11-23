@@ -450,24 +450,35 @@ static void ZXHookBubbleShow(void)
     self.tableView.backgroundColor = ZXColorBgPrimary();
     self.tableView.separatorColor = ZXColorCardBorder();
     self.navigationItem.rightBarButtonItem = ZXMakeNavButton(@"arrow.clockwise.circle.fill", @"Quét lại", ZXColorZaloRed(), self, @selector(rescanAndReload));
-    [self reloadChats];
+    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onHiddenChatsUpdated) name:@"ZXHiddenChatsUpdatedNotification" object:nil];
+    self.chats = [ZXHookEngine discoveredHiddenChats] ?: @[];
+    [ZXHookEngine scanMemoryForHiddenChats];
+}
+- (void)dealloc
+{
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
 }
 - (void)viewWillAppear:(BOOL)animated
 {
     [super viewWillAppear:animated];
     ZXStyleNavBar(self.navigationController.navigationBar);
 }
+- (void)onHiddenChatsUpdated
+{
+    self.chats = [ZXHookEngine discoveredHiddenChats] ?: @[];
+    [self.tableView reloadData];
+    ZXShowToast(self.navigationController.view ?: self.view,
+                [NSString stringWithFormat:@"Quét SQLite hoàn tất: %lu hội thoại ẩn", (unsigned long)self.chats.count]);
+}
 - (void)reloadChats
 {
-    [ZXHookEngine scanMemoryForHiddenChats];
     self.chats = [ZXHookEngine discoveredHiddenChats] ?: @[];
     [self.tableView reloadData];
 }
 - (void)rescanAndReload
 {
-    [self reloadChats];
-    ZXShowToast(self.navigationController.view ?: self.view,
-                [NSString stringWithFormat:@"Đã quét SQLite & RAM: %lu hội thoại ẩn", (unsigned long)self.chats.count]);
+    ZXShowToast(self.navigationController.view ?: self.view, @"Đang quét cơ sở dữ liệu SQLite trên luồng nền...");
+    [ZXHookEngine scanMemoryForHiddenChats];
 }
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section
 {
@@ -2357,33 +2368,45 @@ static void ZXHookFloatingTabBar(void)
 
 + (void)install
 {
-    ZXHookBubbleShow();
-    ZXHookSettingsButton();
-    [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidFinishLaunchingNotification
-                                                      object:nil queue:NSOperationQueue.mainQueue
-                                                  usingBlock:^(NSNotification *n) {
-        (void)n;
+    @try {
+        ZXHookBubbleShow();
         ZXHookSettingsButton();
-        [ZXBubble show];
-        ZXRefreshFloatingBubbleNow();
-    }];
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
-        ZXHookSettingsButton();
-        [ZXBubble restoreIfNeeded];
-        ZXRefreshFloatingBubbleNow();
-    });
-    for (int i = 1; i <= 20; i++) {
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, i * 3 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{ ZXHookFloatingTabBar(); });
+        [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidFinishLaunchingNotification
+                                                          object:nil queue:NSOperationQueue.mainQueue
+                                                      usingBlock:^(NSNotification *n) {
+            (void)n;
+            @try {
+                ZXHookSettingsButton();
+                [ZXBubble show];
+                ZXRefreshFloatingBubbleNow();
+            } @catch (__unused NSException *e) {}
+        }];
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+            @try {
+                ZXHookSettingsButton();
+                [ZXBubble restoreIfNeeded];
+                ZXRefreshFloatingBubbleNow();
+            } @catch (__unused NSException *e) {}
+        });
+        for (int i = 1; i <= 20; i++) {
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, i * 3 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+                @try { ZXHookFloatingTabBar(); } @catch (__unused NSException *e) {}
+            });
+        }
+        [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidBecomeActiveNotification
+                                                          object:nil queue:NSOperationQueue.mainQueue
+                                                      usingBlock:^(NSNotification *n) {
+            (void)n;
+            @try {
+                [self attachGesture];
+                [ZXBubble restoreIfNeeded];
+                ZXRefreshFloatingBubbleNow();
+                ZXHookFloatingTabBar();
+            } @catch (__unused NSException *e) {}
+        }];
+    } @catch (NSException *e) {
+        ZXLog(@"ZXUI install exception: %@", e.reason);
     }
-    [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidBecomeActiveNotification
-                                                      object:nil queue:NSOperationQueue.mainQueue
-                                                  usingBlock:^(NSNotification *n) {
-        (void)n;
-        [self attachGesture];
-        [ZXBubble restoreIfNeeded];
-        ZXRefreshFloatingBubbleNow();
-        ZXHookFloatingTabBar();
-    }];
 }
 
 + (void)attachGesture

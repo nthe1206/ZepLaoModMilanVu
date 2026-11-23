@@ -8,24 +8,38 @@
 #import "ZXUI.h"
 #import "ZXRecallMarker.h"
 
-#define ZX_VERSION @"0.1.0"
+#define ZX_VERSION @"1.2.0"
 
 __attribute__((constructor)) static void ZXInit(void)
 {
     @autoreleasepool {
-        [ZXConfig registerDefaults];
-        ZXLog(@"ZaloXposed iOS %@ loaded in %@", ZX_VERSION, [[NSBundle mainBundle] bundleIdentifier]);
-        [ZXNetwork install];
-        [ZXHookEngine installFromRules];
-        [ZXUI install];
-        [ZXRecallMarker install];
+        @try {
+            [ZXConfig registerDefaults];
+            ZXLog(@"thanhthe iOS %@ loaded in %@", ZX_VERSION, [[NSBundle mainBundle] bundleIdentifier]);
+            [ZXNetwork install];
+            [ZXHookEngine installFromRules];
+            [ZXUI install];
+            [ZXRecallMarker install];
 
-        // Retry rules whose classes live in frameworks loaded later.
-        [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidFinishLaunchingNotification
-                                                          object:nil queue:nil
-                                                      usingBlock:^(NSNotification *n) { [ZXHookEngine retryPending]; }];
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
-            [ZXHookEngine retryPending];
-        });
+            [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidFinishLaunchingNotification
+                                                              object:nil queue:NSOperationQueue.mainQueue
+                                                          usingBlock:^(NSNotification *n) {
+                (void)n;
+                @try {
+                    [ZXHookEngine retryPending];
+                } @catch (NSException *e) {
+                    ZXLog(@"retryPending launch exception: %@", e.reason);
+                }
+            }];
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+                @try {
+                    [ZXHookEngine retryPending];
+                } @catch (NSException *e) {
+                    ZXLog(@"retryPending delayed exception: %@", e.reason);
+                }
+            });
+        } @catch (NSException *e) {
+            ZXLog(@"ZXInit ctor exception: %@", e.reason);
+        }
     }
 }
