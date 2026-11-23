@@ -505,7 +505,14 @@ static void ZXHookBubbleShow(void)
         return cell;
     }
     NSDictionary *c = self.chats[indexPath.row];
-    cell.textLabel.text = [NSString stringWithFormat:@"%@ (UID: %@)", c[@"name"] ?: @"Hội thoại", c[@"uid"] ?: @"?"];
+    NSString *titleText = [c[@"name"] description] ?: @"";
+    NSString *uid = [c[@"uid"] description] ?: @"?";
+    if (titleText.length == 0) {
+        titleText = [NSString stringWithFormat:@"Chưa giải mã tên • ID: %@", uid];
+    } else if ([titleText rangeOfString:uid].location == NSNotFound) {
+        titleText = [NSString stringWithFormat:@"%@ (ID: %@)", titleText, uid];
+    }
+    cell.textLabel.text = titleText;
     cell.detailTextLabel.text = [NSString stringWithFormat:@"Tin cuối: %@", c[@"lastMessage"] ?: @"(Trống)"];
     cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
     return cell;
@@ -516,25 +523,19 @@ static void ZXHookBubbleShow(void)
     if (self.chats.count == 0) return;
     NSDictionary *c = self.chats[indexPath.row];
     NSString *uid = [c[@"uid"] description] ?: @"";
-    NSString *name = [c[@"name"] description] ?: uid;
+    NSString *rawName = [c[@"rawName"] description] ?: @"";
+    NSString *name = rawName.length > 0 ? rawName : ([c[@"name"] description] ?: uid);
 
-    UIAlertController *sheet = [UIAlertController alertControllerWithTitle:name
-                                                                   message:[NSString stringWithFormat:@"UID: %@\n%@", uid, c[@"lastMessage"] ?: @""]
+    UIAlertController *sheet = [UIAlertController alertControllerWithTitle:([c[@"name"] description] ?: name)
+                                                                   message:[NSString stringWithFormat:@"ID gốc: %@\n%@", uid, c[@"lastMessage"] ?: @""]
                                                             preferredStyle:UIAlertControllerStyleActionSheet];
     if (@available(iOS 13.0, *)) sheet.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
     [sheet addAction:[UIAlertAction actionWithTitle:@"💬 Mở thẳng khung chat" style:UIAlertActionStyleDefault handler:^(UIAlertAction *act) {
         (void)act;
-        // Walk all the way up the thanhthe modal stack so every popup/sheet and main menu closes cleanly
-        UIViewController *rootMod = self;
-        while (rootMod.presentingViewController) {
-            UIViewController *p = rootMod.presentingViewController;
-            NSString *pCls = NSStringFromClass([p class]);
-            BOOL isMod = [pCls hasPrefix:@"ZX"] || ([p isKindOfClass:[UINavigationController class]] &&
-                [NSStringFromClass([((UINavigationController *)p).viewControllers.firstObject class]) hasPrefix:@"ZX"]);
-            rootMod = p;
-            if (!isMod) break;
-        }
-        [rootMod dismissViewControllerAnimated:YES completion:^{
+        // Step A: Dismiss all presented UIViewControllers from the rootViewController of the keyWindow
+        UIWindow *keyWin = ZXKeyWindow();
+        UIViewController *rootVC = keyWin.rootViewController ?: self;
+        [rootVC dismissViewControllerAnimated:YES completion:^{
             [ZXBubble show];
             ZXRefreshFloatingBubbleNow();
             [ZXHookEngine openChatWithID:uid displayName:name];

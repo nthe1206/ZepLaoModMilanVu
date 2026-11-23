@@ -1758,11 +1758,25 @@ static UITextField *ZXFindSearchTextFieldInView(UIView *v)
 static UIControl *ZXFindTopSearchTriggerButton(UIView *v, UIWindow *win)
 {
     if (!v || !win || v.hidden || v.alpha < 0.05) return nil;
-    if ([v isKindOfClass:[UIControl class]]) {
-        CGRect r = [v convertRect:v.bounds toView:win];
+    CGRect r = [v convertRect:v.bounds toView:win];
+    if (r.origin.y >= 18 && r.origin.y <= 145) {
         NSString *acc = (v.accessibilityLabel ?: @"").lowercaseString;
-        if (r.origin.y >= 20 && r.origin.y <= 140 &&
-            ([acc containsString:@"tìm"] || [acc containsString:@"search"] || r.size.width > 120)) {
+        BOOL hasSearchText = ([acc containsString:@"tìm"] || [acc containsString:@"search"]);
+        if (!hasSearchText && [v isKindOfClass:[UILabel class]]) {
+            NSString *lt = ([(UILabel *)v text] ?: @"").lowercaseString;
+            hasSearchText = ([lt containsString:@"tìm"] || [lt containsString:@"search"]);
+        }
+        if (hasSearchText) {
+            UIView *cur = v;
+            while (cur && cur != win) {
+                if ([cur isKindOfClass:[UIControl class]] || cur.gestureRecognizers.count > 0) {
+                    return (UIControl *)cur;
+                }
+                cur = cur.superview;
+            }
+            return (UIControl *)v;
+        }
+        if (([v isKindOfClass:[UIControl class]] || v.gestureRecognizers.count > 0) && r.size.width >= 120 && r.size.height >= 24 && r.size.height <= 60) {
             return (UIControl *)v;
         }
     }
@@ -1771,6 +1785,51 @@ static UIControl *ZXFindTopSearchTriggerButton(UIView *v, UIWindow *win)
         if (found) return found;
     }
     return nil;
+}
+
+static UIView *ZXFindFirstResponderInView(UIView *v)
+{
+    if (!v) return nil;
+    if (v.isFirstResponder) return v;
+    for (UIView *sub in v.subviews) {
+        UIView *found = ZXFindFirstResponderInView(sub);
+        if (found) return found;
+    }
+    return nil;
+}
+
+static void ZXShowBottomBannerOnWindow(UIWindow *win, NSString *msg)
+{
+    if (!win || msg.length == 0) return;
+    @try {
+        UIView *old = [win viewWithTag:0x544F4154];
+        if (old) [old removeFromSuperview];
+
+        CGFloat maxW = win.bounds.size.width - 36.0;
+        UILabel *lbl = [[UILabel alloc] initWithFrame:CGRectMake(14, 8, maxW - 28, 38)];
+        lbl.text = msg;
+        lbl.textColor = UIColor.whiteColor;
+        lbl.font = [UIFont systemFontOfSize:13 weight:UIFontWeightBold];
+        lbl.textAlignment = NSTextAlignmentCenter;
+        lbl.numberOfLines = 2;
+
+        UIView *banner = [[UIView alloc] initWithFrame:CGRectMake(18, win.bounds.size.height - 120.0, maxW, 54.0)];
+        banner.tag = 0x544F4154;
+        banner.backgroundColor = [UIColor colorWithRed:0.09 green:0.11 blue:0.14 alpha:0.96];
+        banner.layer.cornerRadius = 14.0;
+        banner.layer.borderWidth = 1.2;
+        banner.layer.borderColor = [UIColor colorWithRed:0.898 green:0.224 blue:0.208 alpha:1.0].CGColor;
+        banner.userInteractionEnabled = NO;
+        [banner addSubview:lbl];
+        [win addSubview:banner];
+
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.8 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            [UIView animateWithDuration:0.25 animations:^{ banner.alpha = 0; } completion:^(BOOL d) {
+                (void)d;
+                [banner removeFromSuperview];
+            }];
+        });
+    } @catch (__unused NSException *e) {}
 }
 
 + (void)scanMemoryForHiddenChats
@@ -1848,97 +1907,83 @@ static UIControl *ZXFindTopSearchTriggerButton(UIView *v, UIWindow *win)
                                  [[NSCharacterSet decimalDigitCharacterSet] invertedSet]] componentsJoinedByString:@""];
         NSString *uidArg = (cleanDigits.length >= 5) ? cleanDigits : (chatID ?: @"");
 
-        // (a) Try direct open-chat selectors on Zalo's view controllers & singleton managers
-        NSMutableArray *candidates = [NSMutableArray new];
-        UIWindow *win = ZXActiveWindow();
-        UIViewController *root = win.rootViewController;
-        if (root) {
-            [candidates addObject:root];
-            if ([root isKindOfClass:[UITabBarController class]]) {
-                UITabBarController *tbc = (UITabBarController *)root;
-                tbc.selectedIndex = 0;
-                for (UIViewController *vc in tbc.viewControllers) {
-                    [candidates addObject:vc];
-                    if ([vc isKindOfClass:[UINavigationController class]]) {
-                        for (UIViewController *child in ((UINavigationController *)vc).viewControllers) {
-                            [candidates addObject:child];
-                        }
-                    }
-                }
-            } else if ([root isKindOfClass:[UINavigationController class]]) {
-                for (UIViewController *child in ((UINavigationController *)root).viewControllers) {
-                    [candidates addObject:child];
-                }
-            }
+        // Determine the best search query: use real human name if resolved, otherwise raw ID (e.g. 320193294)
+        NSString *query = [displayName ?: @"" stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+        NSRange idParen = [query rangeOfString:@" (ID:"];
+        if (idParen.location != NSNotFound) {
+            query = [query substringToIndex:idParen.location];
         }
-        for (NSString *mgrName in @[@"ChatUIManager", @"ZAChatUIManager", @"ZANavigationManager", @"NavigationManager", @"ZARouter", @"ChatDataManager"]) {
-            Class c = NSClassFromString(mgrName);
-            if (!c) continue;
-            [candidates addObject:c];
-            for (NSString *sName in @[@"sharedInstance", @"sharedManager", @"defaultManager", @"shared"]) {
-                SEL s = NSSelectorFromString(sName);
-                if ([c respondsToSelector:s]) {
-                    @try {
-                        id inst = ((id (*)(id, SEL))[c methodForSelector:s])(c, s);
-                        if (inst) [candidates addObject:inst];
-                    } @catch (__unused NSException *e) {}
-                }
-            }
-        }
-
-        NSArray<NSString *> *openSelectors = @[
-            @"openChatWithUserId:", @"openChatWithThreadId:", @"openConversationWithId:",
-            @"navigateToChatWithUid:", @"openChatWithId:", @"openChatViewWithUserId:",
-            @"pushChatViewControllerWithThreadId:", @"startChatWithUserId:"
-        ];
-        for (id target in candidates) {
-            for (NSString *selStr in openSelectors) {
-                SEL sel = NSSelectorFromString(selStr);
-                if ([target respondsToSelector:sel]) {
-                    @try {
-                        ((void (*)(id, SEL, id))[target methodForSelector:sel])(target, sel, uidArg);
-                        ZXLog(@"openChatWithID invoked -[%@ %@] with %@", NSStringFromClass([target class]), selStr, uidArg);
-                        return YES;
-                    } @catch (__unused NSException *e) {}
-                }
-            }
-        }
-
-        // (b) Fallback: Activate Zalo's Search Bar on the Messages tab & auto-fill the real Display Name (or ID / PIN)
-        NSString *query = displayName ?: @"";
-        if (query.length == 0 || [query hasPrefix:@"UID:"] || [query hasPrefix:@"Hội thoại"]) {
+        if (query.length == 0 || [query hasPrefix:@"Chưa giải mã"] || [query hasPrefix:@"UID:"] || [query hasPrefix:@"Hội thoại"]) {
             query = uidArg;
         }
-        if (win) {
-            UIControl *searchTrigger = ZXFindTopSearchTriggerButton(win, win);
-            if (searchTrigger) {
-                [searchTrigger sendActionsForControlEvents:UIControlEventTouchUpInside];
+
+        // Always copy query to generalPasteboard as an instant backup
+        [UIPasteboard generalPasteboard].string = query;
+
+        UIWindow *win = ZXActiveWindow();
+        if (!win) return NO;
+
+        // Step B: Switch Zalo's main UITabBarController to selectedIndex = 0 (Messages tab)
+        UIViewController *root = win.rootViewController;
+        if ([root isKindOfClass:[UITabBarController class]]) {
+            ((UITabBarController *)root).selectedIndex = 0;
+        } else if (root.tabBarController) {
+            root.tabBarController.selectedIndex = 0;
+        } else {
+            for (UIViewController *child in root.childViewControllers) {
+                if ([child isKindOfClass:[UITabBarController class]]) {
+                    ((UITabBarController *)child).selectedIndex = 0;
+                    break;
+                }
             }
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                @try {
-                    UISearchBar *sb = ZXFindSearchBarInView(win);
-                    if (sb) {
-                        [sb becomeFirstResponder];
-                        sb.text = query;
-                        if ([sb.delegate respondsToSelector:@selector(searchBar:textDidChange:)]) {
-                            [sb.delegate searchBar:sb textDidChange:query];
-                        }
-                        return;
-                    }
-                    UITextField *tf = ZXFindSearchTextFieldInView(win);
-                    if (tf) {
-                        [tf becomeFirstResponder];
-                        tf.text = query;
-                        [tf sendActionsForControlEvents:UIControlEventEditingChanged];
-                        [[NSNotificationCenter defaultCenter] postNotificationName:UITextFieldTextDidChangeNotification object:tf];
-                        return;
-                    }
-                    // Also copy to pasteboard so the user can paste immediately if Zalo uses a custom search trigger
-                    [UIPasteboard generalPasteboard].string = query;
-                } @catch (__unused NSException *e) {}
-            });
-            return YES;
         }
+
+        // Step C: Find Zalo's search bar / search trigger at the top of the main screen (y < 140pt) and activate it
+        UISearchBar *initialSB = ZXFindSearchBarInView(win);
+        UITextField *initialTF = ZXFindSearchTextFieldInView(win);
+        if (initialSB) {
+            [initialSB becomeFirstResponder];
+        } else if (initialTF) {
+            [initialTF becomeFirstResponder];
+        } else {
+            UIView *searchTrigger = ZXFindTopSearchTriggerButton(win, win);
+            if (searchTrigger) {
+                ZXFireTouchAndGesturesOnView(searchTrigger);
+            }
+        }
+
+        // Step D: After 0.45s when the search input opens, fill in the query, notify delegate, and show Toast
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.45 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            @try {
+                UIView *firstResp = ZXFindFirstResponderInView(win);
+                UISearchBar *sb = [firstResp isKindOfClass:[UISearchBar class]] ? (UISearchBar *)firstResp : ZXFindSearchBarInView(win);
+                UITextField *tf = [firstResp isKindOfClass:[UITextField class]] ? (UITextField *)firstResp : ZXFindSearchTextFieldInView(win);
+
+                if (sb) {
+                    if (!sb.isFirstResponder) [sb becomeFirstResponder];
+                    sb.text = query;
+                    if ([sb.delegate respondsToSelector:@selector(searchBar:textDidChange:)]) {
+                        [sb.delegate searchBar:sb textDidChange:query];
+                    }
+                }
+                if (tf) {
+                    if (!tf.isFirstResponder) [tf becomeFirstResponder];
+                    tf.text = @"";
+                    [tf insertText:query];
+                    if (tf.text.length == 0) tf.text = query;
+                    if ([tf.delegate respondsToSelector:@selector(textField:shouldChangeCharactersInRange:replacementString:)]) {
+                        [tf.delegate textField:tf shouldChangeCharactersInRange:NSMakeRange(0, 0) replacementString:query];
+                    }
+                    [tf sendActionsForControlEvents:UIControlEventEditingChanged];
+                    [[NSNotificationCenter defaultCenter] postNotificationName:UITextFieldTextDidChangeNotification object:tf];
+                }
+
+                ZXShowBottomBannerOnWindow(win, @"Đã điền vào ô Tìm kiếm — chạm vào kết quả để mở chat");
+            } @catch (NSException *e) {
+                ZXLog(@"Step D search fill exception: %@", e.reason);
+            }
+        });
+        return YES;
     } @catch (NSException *e) {
         ZXLog(@"openChatWithID exception: %@", e.reason);
     }
