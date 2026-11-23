@@ -6,7 +6,18 @@
 #import "ZXAntiRecall.h"
 #import "ZXRecallMarker.h"
 #import "ZXBubble.h"
+#import <LocalAuthentication/LocalAuthentication.h>
+#import <AVFoundation/AVFoundation.h>
 #import <objc/runtime.h>
+
+// ---------------------------------------------------------------- theme palette
+
+static UIColor *ZXColorBgPrimary(void)   { return [UIColor colorWithRed:0.051 green:0.059 blue:0.071 alpha:1.0]; } // #0D0F12
+static UIColor *ZXColorCardBg(void)      { return [UIColor colorWithRed:0.094 green:0.106 blue:0.125 alpha:1.0]; } // #181B20
+static UIColor *ZXColorCardBorder(void)  { return [UIColor colorWithRed:0.165 green:0.184 blue:0.227 alpha:1.0]; } // #2A2F3A
+static UIColor *ZXColorTextSub(void)     { return [UIColor colorWithRed:0.612 green:0.639 blue:0.686 alpha:1.0]; } // #9CA3AF
+static UIColor *ZXColorZaloRed(void)     { return [UIColor colorWithRed:0.898 green:0.224 blue:0.208 alpha:1.0]; } // #E53935
+static UIColor *ZXColorNavTint(void)     { return [UIColor colorWithRed:0.950 green:0.260 blue:0.210 alpha:1.0]; } // High-contrast red
 
 static UIWindow *ZXKeyWindow(void)
 {
@@ -29,6 +40,264 @@ static UIViewController *ZXTopVC(void)
     return v;
 }
 
+static void ZXStyleNavBar(UINavigationBar *bar)
+{
+    if (!bar) return;
+    if (@available(iOS 13.0, *)) bar.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
+    bar.prefersLargeTitles = NO;
+    bar.translucent = NO;
+    bar.tintColor = ZXColorNavTint();
+    bar.barTintColor = ZXColorBgPrimary();
+    bar.backgroundColor = ZXColorBgPrimary();
+    if (@available(iOS 13.0, *)) {
+        UINavigationBarAppearance *ap = [UINavigationBarAppearance new];
+        [ap configureWithOpaqueBackground];
+        ap.backgroundColor = ZXColorBgPrimary();
+        ap.shadowColor = ZXColorCardBorder();
+        ap.titleTextAttributes = @{
+            NSForegroundColorAttributeName: UIColor.whiteColor,
+            NSFontAttributeName: [UIFont systemFontOfSize:17 weight:UIFontWeightBold]
+        };
+        ap.largeTitleTextAttributes = @{
+            NSForegroundColorAttributeName: UIColor.whiteColor,
+            NSFontAttributeName: [UIFont systemFontOfSize:28 weight:UIFontWeightHeavy]
+        };
+        bar.standardAppearance = ap;
+        bar.scrollEdgeAppearance = ap;
+        bar.compactAppearance = ap;
+        if (@available(iOS 15.0, *)) {
+            bar.compactScrollEdgeAppearance = ap;
+        }
+    }
+}
+
+/// Custom high-contrast bar button with SF Symbol icon so iOS 18-26 never renders blank white buttons.
+static UIBarButtonItem *ZXMakeNavButton(NSString *symbolName, NSString *title, UIColor *iconColor, id target, SEL action)
+{
+    UIButton *btn = [UIButton buttonWithType:UIButtonTypeCustom];
+    btn.backgroundColor = ZXColorCardBg();
+    btn.layer.cornerRadius = 17;
+    btn.layer.borderWidth = 1.0;
+    btn.layer.borderColor = ZXColorCardBorder().CGColor;
+    btn.clipsToBounds = YES;
+
+    UIImage *img = nil;
+    if (@available(iOS 13.0, *)) {
+        UIImageSymbolConfiguration *cfg = [UIImageSymbolConfiguration configurationWithPointSize:16 weight:UIImageSymbolWeightBold];
+        img = [[UIImage systemImageNamed:symbolName withConfiguration:cfg] imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
+    }
+    UIImageView *iv = [[UIImageView alloc] initWithImage:img];
+    iv.tintColor = iconColor ?: ZXColorNavTint();
+    iv.contentMode = UIViewContentModeScaleAspectFit;
+    iv.userInteractionEnabled = NO;
+
+    UILabel *lbl = [UILabel new];
+    lbl.text = title;
+    lbl.textColor = UIColor.whiteColor;
+    lbl.font = [UIFont systemFontOfSize:13.5 weight:UIFontWeightSemibold];
+    lbl.userInteractionEnabled = NO;
+    [lbl sizeToFit];
+
+    CGFloat padX = 10.0;
+    CGFloat iconSz = 18.0;
+    CGFloat gap = title.length ? 5.0 : 0.0;
+    CGFloat totalW = padX + iconSz + gap + ceil(lbl.bounds.size.width) + padX;
+    CGFloat h = 34.0;
+    btn.frame = CGRectMake(0, 0, totalW, h);
+    iv.frame = CGRectMake(padX, (h - iconSz) / 2.0, iconSz, iconSz);
+    lbl.frame = CGRectMake(padX + iconSz + gap, 0, ceil(lbl.bounds.size.width), h);
+
+    [btn addSubview:iv];
+    if (title.length) [btn addSubview:lbl];
+    [btn addTarget:target action:action forControlEvents:UIControlEventTouchUpInside];
+    btn.accessibilityLabel = title;
+    return [[UIBarButtonItem alloc] initWithCustomView:btn];
+}
+
+// ---------------------------------------------------------------- Face ID / Passcode / PIN Auth Helper
+
+static void ZXAuthenticateUserFromVC(UIViewController *vc, NSString *reason, void (^onSuccess)(void))
+{
+    if (!onSuccess) return;
+    LAContext *ctx = [LAContext new];
+    NSError *err = nil;
+    if ([ctx canEvaluatePolicy:LAPolicyDeviceOwnerAuthentication error:&err]) {
+        [ctx evaluatePolicy:LAPolicyDeviceOwnerAuthentication
+            localizedReason:(reason ?: @"Xác thực để truy cập mục bảo mật thanhthe")
+                      reply:^(BOOL success, NSError * _Nullable error) {
+            (void)error;
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (success) {
+                    onSuccess();
+                } else if ([ZXConfig chatLockPIN].length > 0) {
+                    UIAlertController *a = [UIAlertController alertControllerWithTitle:@"Nhập mã PIN dự phòng"
+                                                                               message:reason
+                                                                        preferredStyle:UIAlertControllerStyleAlert];
+                    if (@available(iOS 13.0, *)) a.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
+                    [a addTextFieldWithConfigurationHandler:^(UITextField *tf) {
+                        tf.keyboardType = UIKeyboardTypeNumberPad;
+                        tf.secureTextEntry = YES;
+                        tf.placeholder = @"Mã PIN 4 số";
+                    }];
+                    [a addAction:[UIAlertAction actionWithTitle:@"Hủy" style:UIAlertActionStyleCancel handler:nil]];
+                    [a addAction:[UIAlertAction actionWithTitle:@"Xác nhận" style:UIAlertActionStyleDefault handler:^(UIAlertAction *act) {
+                        (void)act;
+                        if ([a.textFields.firstObject.text isEqualToString:[ZXConfig chatLockPIN]]) {
+                            onSuccess();
+                        }
+                    }]];
+                    [vc presentViewController:a animated:YES completion:nil];
+                }
+            });
+        }];
+        return;
+    }
+
+    NSString *pin = [ZXConfig chatLockPIN];
+    if (pin.length == 0) {
+        onSuccess();
+        return;
+    }
+    UIAlertController *a = [UIAlertController alertControllerWithTitle:@"Nhập mã PIN bảo mật"
+                                                               message:reason
+                                                        preferredStyle:UIAlertControllerStyleAlert];
+    if (@available(iOS 13.0, *)) a.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
+    [a addTextFieldWithConfigurationHandler:^(UITextField *tf) {
+        tf.keyboardType = UIKeyboardTypeNumberPad;
+        tf.secureTextEntry = YES;
+        tf.placeholder = @"Mã PIN 4 số";
+    }];
+    [a addAction:[UIAlertAction actionWithTitle:@"Hủy" style:UIAlertActionStyleCancel handler:nil]];
+    [a addAction:[UIAlertAction actionWithTitle:@"Mở" style:UIAlertActionStyleDefault handler:^(UIAlertAction *act) {
+        (void)act;
+        if ([a.textFields.firstObject.text isEqualToString:pin]) {
+            onSuccess();
+        }
+    }]];
+    [vc presentViewController:a animated:YES completion:nil];
+}
+
+// ---------------------------------------------------------------- CoreGraphics Red Zalo Logo & Bubble Sync
+
+static UIImage *ZXDrawRedZaloLogo(CGSize size)
+{
+    CGFloat d = MAX(24.0, MIN(size.width, size.height));
+    UIGraphicsImageRendererFormat *fmt = [UIGraphicsImageRendererFormat defaultFormat];
+    fmt.opaque = NO;
+    fmt.scale = UIScreen.mainScreen.scale;
+    UIGraphicsImageRenderer *renderer = [[UIGraphicsImageRenderer alloc] initWithSize:CGSizeMake(d, d) format:fmt];
+    return [renderer imageWithActions:^(UIGraphicsImageRendererContext *ctx) {
+        (void)ctx;
+        CGRect rect = CGRectMake(0, 0, d, d);
+        UIBezierPath *circle = [UIBezierPath bezierPathWithOvalInRect:rect];
+        [circle addClip];
+
+        [ZXColorZaloRed() setFill];
+        [circle fill];
+
+        UIBezierPath *ring = [UIBezierPath bezierPathWithOvalInRect:CGRectInset(rect, d * 0.045, d * 0.045)];
+        ring.lineWidth = MAX(1.2, d * 0.035);
+        [[UIColor colorWithWhite:1.0 alpha:0.30] setStroke];
+        [ring stroke];
+
+        NSString *text = @"Zalo";
+        UIFont *font = [UIFont systemFontOfSize:round(d * 0.33) weight:UIFontWeightHeavy];
+        NSDictionary *attrs = @{
+            NSFontAttributeName: font,
+            NSForegroundColorAttributeName: UIColor.whiteColor
+        };
+        CGSize ts = [text sizeWithAttributes:attrs];
+        CGRect tr = CGRectMake((d - ts.width) / 2.0, (d - ts.height) / 2.0, ts.width, ts.height);
+        [text drawInRect:tr withAttributes:attrs];
+    }];
+}
+
+static UIImage *ZXCropCircularImage(UIImage *source, CGFloat diameter)
+{
+    if (!source) return nil;
+    CGFloat d = MAX(32.0, diameter);
+    UIGraphicsImageRendererFormat *fmt = [UIGraphicsImageRendererFormat defaultFormat];
+    fmt.opaque = NO;
+    fmt.scale = UIScreen.mainScreen.scale;
+    UIGraphicsImageRenderer *renderer = [[UIGraphicsImageRenderer alloc] initWithSize:CGSizeMake(d, d) format:fmt];
+    return [renderer imageWithActions:^(UIGraphicsImageRendererContext *ctx) {
+        (void)ctx;
+        CGRect rect = CGRectMake(0, 0, d, d);
+        [[UIBezierPath bezierPathWithOvalInRect:rect] addClip];
+        CGSize src = source.size;
+        CGFloat scale = MAX(d / MAX(1.0, src.width), d / MAX(1.0, src.height));
+        CGFloat w = src.width * scale;
+        CGFloat h = src.height * scale;
+        [source drawInRect:CGRectMake((d - w) / 2.0, (d - h) / 2.0, w, h)];
+    }];
+}
+
+static UIImage *ZXCurrentFloatingLogo(CGSize size)
+{
+    if ([ZXConfig customLogoMode]) {
+        NSString *path = [ZXConfig customLogoPath];
+        if ([[NSFileManager defaultManager] fileExistsAtPath:path]) {
+            UIImage *custom = [UIImage imageWithContentsOfFile:path];
+            if (custom) return ZXCropCircularImage(custom, MAX(size.width, size.height));
+        }
+    }
+    return ZXDrawRedZaloLogo(size);
+}
+
+static void ZXRefreshFloatingBubbleNow(void)
+{
+    SEL refreshSel = NSSelectorFromString(@"refresh");
+    if ([ZXBubble respondsToSelector:refreshSel]) {
+        ((void (*)(id, SEL))[ZXBubble methodForSelector:refreshSel])([ZXBubble class], refreshSel);
+    }
+    CGFloat sz = (CGFloat)[ZXConfig bubbleSize];
+    UIImage *logo = ZXCurrentFloatingLogo(CGSizeMake(sz, sz));
+    for (UIWindow *w in UIApplication.sharedApplication.windows) {
+        if (w.windowLevel < UIWindowLevelAlert + 50) continue;
+        UIView *root = w.rootViewController.view;
+        if (!root || root.subviews.count == 0) continue;
+        CGRect b = w.windowScene ? w.windowScene.coordinateSpace.bounds : UIScreen.mainScreen.bounds;
+        CGRect wf = w.frame;
+        wf.size = CGSizeMake(sz, sz);
+        wf.origin.x = (wf.origin.x + sz / 2.0 < b.size.width / 2.0) ? 6.0 : (b.size.width - sz - 6.0);
+        wf.origin.y = MAX(40.0, MIN(b.size.height - sz - 20.0, wf.origin.y));
+        w.frame = wf;
+
+        UIView *circle = root.subviews.firstObject;
+        circle.frame = CGRectMake(0, 0, sz, sz);
+        circle.backgroundColor = UIColor.clearColor;
+        circle.layer.cornerRadius = sz / 2.0;
+        circle.layer.borderWidth = 0;
+        for (UIView *sub in circle.subviews) {
+            if ([sub isKindOfClass:[UIImageView class]]) {
+                UIImageView *iv = (UIImageView *)sub;
+                iv.frame = circle.bounds;
+                iv.contentMode = UIViewContentModeScaleAspectFill;
+                iv.clipsToBounds = YES;
+                iv.layer.cornerRadius = sz / 2.0;
+                iv.image = logo;
+            }
+        }
+    }
+}
+
+static void ZXHookBubbleShow(void)
+{
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        Class meta = object_getClass([ZXBubble class]);
+        SEL sel = @selector(show);
+        Method m = class_getClassMethod([ZXBubble class], sel);
+        if (!m || !meta) return;
+        IMP orig = method_getImplementation(m);
+        IMP hook = imp_implementationWithBlock(^(id self_) {
+            ((void (*)(id, SEL))orig)(self_, sel);
+            ZXRefreshFloatingBubbleNow();
+        });
+        method_setImplementation(m, hook);
+    });
+}
+
 // ---------------------------------------------------------------- text viewer/editor
 
 @interface ZXTextViewController : UIViewController
@@ -42,44 +311,34 @@ static UIViewController *ZXTopVC(void)
 - (void)viewDidLoad
 {
     [super viewDidLoad];
-    if (@available(iOS 13.0, *)) self.view.backgroundColor = UIColor.systemBackgroundColor;
-    else self.view.backgroundColor = UIColor.whiteColor;
+    if (@available(iOS 13.0, *)) self.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
+    self.view.backgroundColor = ZXColorBgPrimary();
     self.textView = [[UITextView alloc] initWithFrame:self.view.bounds];
     self.textView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-    self.textView.font = [UIFont fontWithName:@"Menlo" size:11] ?: [UIFont systemFontOfSize:11];
+    self.textView.backgroundColor = ZXColorBgPrimary();
+    self.textView.textColor = UIColor.whiteColor;
+    self.textView.tintColor = ZXColorZaloRed();
+    self.textView.font = [UIFont fontWithName:@"Menlo" size:12] ?: [UIFont systemFontOfSize:12];
     self.textView.text = self.initialText;
     self.textView.editable = self.editable;
     self.textView.autocorrectionType = UITextAutocorrectionTypeNo;
     self.textView.autocapitalizationType = UITextAutocapitalizationTypeNone;
     [self.view addSubview:self.textView];
     if (self.editable)
-        self.navigationItem.rightBarButtonItem =
-            [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemSave target:self action:@selector(save)];
+        self.navigationItem.rightBarButtonItem = ZXMakeNavButton(@"checkmark.circle.fill", @"Lưu", ZXColorZaloRed(), self, @selector(save));
     else
-        self.navigationItem.rightBarButtonItem =
-            [[UIBarButtonItem alloc] initWithTitle:@"Sao chép" style:UIBarButtonItemStylePlain target:self action:@selector(copyAll)];
+        self.navigationItem.rightBarButtonItem = ZXMakeNavButton(@"doc.on.doc.fill", @"Sao chép", ZXColorZaloRed(), self, @selector(copyAll));
 }
 - (void)viewWillAppear:(BOOL)animated
 {
     [super viewWillAppear:animated];
-    // plain white text page: give the bar an opaque dark background so white titles/buttons stay readable
-    UINavigationBar *bar = self.navigationController.navigationBar;
-    bar.prefersLargeTitles = NO;
-    bar.tintColor = UIColor.whiteColor;
-    if (@available(iOS 13.0, *)) {
-        UINavigationBarAppearance *ap = [UINavigationBarAppearance new];
-        [ap configureWithOpaqueBackground];
-        ap.backgroundColor = [UIColor colorWithRed:0.08 green:0.16 blue:0.34 alpha:1];
-        ap.titleTextAttributes = @{ NSForegroundColorAttributeName: UIColor.whiteColor };
-        bar.standardAppearance = ap;
-        bar.scrollEdgeAppearance = ap;
-        bar.compactAppearance = ap;
-    }
+    ZXStyleNavBar(self.navigationController.navigationBar);
 }
 - (void)copyAll
 {
     [UIPasteboard generalPasteboard].string = self.textView.text ?: @"";
-    UIAlertController *a = [UIAlertController alertControllerWithTitle:@"Đã sao chép" message:@"Dán vào chat để gửi." preferredStyle:UIAlertControllerStyleAlert];
+    UIAlertController *a = [UIAlertController alertControllerWithTitle:@"Đã sao chép" message:@"Dán vào chat hoặc trình sửa văn bản." preferredStyle:UIAlertControllerStyleAlert];
+    if (@available(iOS 13.0, *)) a.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
     [a addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
     [self presentViewController:a animated:YES completion:nil];
 }
@@ -88,6 +347,7 @@ static UIViewController *ZXTopVC(void)
     NSString *err = nil;
     if (self.onSave && !self.onSave(self.textView.text, &err)) {
         UIAlertController *a = [UIAlertController alertControllerWithTitle:@"Lỗi" message:err ?: @"Không lưu được" preferredStyle:UIAlertControllerStyleAlert];
+        if (@available(iOS 13.0, *)) a.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
         [a addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
         [self presentViewController:a animated:YES completion:nil];
         return;
@@ -96,612 +356,922 @@ static UIViewController *ZXTopVC(void)
 }
 @end
 
+// ---------------------------------------------------------------- Screen 1: Hidden Chats Viewer
 
-// ---------------------------------------------------------------- visual theme (landscape background, rounded cards, animated toggle)
-
-static UIImage *ZXLandscapeImage(CGSize size)
-{
-    UIGraphicsImageRenderer *r = [[UIGraphicsImageRenderer alloc] initWithSize:size];
-    return [r imageWithActions:^(UIGraphicsImageRendererContext *ctx) {
-        CGContextRef c = ctx.CGContext;
-        CGFloat w = size.width, h = size.height;
-        CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
-
-        // sky: night teal -> dawn orange -> pink haze
-        NSArray *sky = @[(id)[UIColor colorWithRed:0.08 green:0.20 blue:0.42 alpha:1].CGColor,
-                         (id)[UIColor colorWithRed:0.26 green:0.38 blue:0.64 alpha:1].CGColor,
-                         (id)[UIColor colorWithRed:0.93 green:0.52 blue:0.42 alpha:1].CGColor,
-                         (id)[UIColor colorWithRed:1.00 green:0.78 blue:0.55 alpha:1].CGColor];
-        CGFloat locs[] = {0.0, 0.38, 0.66, 0.85};
-        CGGradientRef g = CGGradientCreateWithColors(cs, (__bridge CFArrayRef)sky, locs);
-        CGContextDrawLinearGradient(c, g, CGPointMake(0, 0), CGPointMake(0, h), 0);
-        CGGradientRelease(g);
-
-        // sun glow
-        CGPoint sun = CGPointMake(w * 0.72, h * 0.50);
-        NSArray *glow = @[(id)[UIColor colorWithRed:1 green:0.95 blue:0.75 alpha:0.95].CGColor,
-                          (id)[UIColor colorWithRed:1 green:0.75 blue:0.45 alpha:0.35].CGColor,
-                          (id)[UIColor colorWithRed:1 green:0.6 blue:0.4 alpha:0.0].CGColor];
-        CGFloat gl[] = {0.0, 0.25, 1.0};
-        CGGradientRef sg = CGGradientCreateWithColors(cs, (__bridge CFArrayRef)glow, gl);
-        CGContextDrawRadialGradient(c, sg, sun, 0, sun, w * 0.7, 0);
-        CGGradientRelease(sg);
-
-        // stars
-        srand(7);
-        for (int i = 0; i < 40; i++) {
-            CGFloat x = (rand() % 1000) / 1000.0 * w, y = (rand() % 1000) / 1000.0 * h * 0.32;
-            CGFloat a = 0.25 + (rand() % 60) / 100.0, d = 1 + (rand() % 20) / 10.0;
-            CGContextSetFillColorWithColor(c, [UIColor colorWithWhite:1 alpha:a].CGColor);
-            CGContextFillEllipseInRect(c, CGRectMake(x, y, d, d));
-        }
-
-        // mountain ranges, far -> near
-        struct { CGFloat base, a1, f1, p1, a2, f2, p2; CGFloat r, g, b; } L[] = {
-            {0.55, 26, 0.010, 0.4, 10, 0.031, 1.1, 0.62, 0.48, 0.62},
-            {0.64, 34, 0.008, 2.0, 12, 0.026, 0.3, 0.36, 0.40, 0.60},
-            {0.74, 30, 0.012, 4.1, 14, 0.034, 2.2, 0.16, 0.36, 0.42},
-            {0.85, 26, 0.009, 1.3, 10, 0.040, 3.5, 0.06, 0.22, 0.26},
-        };
-        for (int i = 0; i < 4; i++) {
-            CGMutablePathRef p = CGPathCreateMutable();
-            CGPathMoveToPoint(p, NULL, 0, h);
-            for (CGFloat x = 0; x <= w + 4; x += 4) {
-                CGFloat y = h * L[i].base + sin(x * L[i].f1 + L[i].p1) * L[i].a1 + sin(x * L[i].f2 + L[i].p2) * L[i].a2;
-                CGPathAddLineToPoint(p, NULL, x, y);
-            }
-            CGPathAddLineToPoint(p, NULL, w, h);
-            CGPathCloseSubpath(p);
-            CGContextAddPath(c, p);
-            CGContextSetFillColorWithColor(c, [UIColor colorWithRed:L[i].r green:L[i].g blue:L[i].b alpha:1].CGColor);
-            CGContextFillPath(c);
-            CGPathRelease(p);
-        }
-        CGColorSpaceRelease(cs);
-    }];
-}
-
-static UIView *ZXMakeCloud(CGFloat w)
-{
-    UIView *v = [[UIView alloc] initWithFrame:CGRectMake(0, 0, w, w * 0.36)];
-    CGFloat h = v.bounds.size.height;
-    CGRect parts[] = {CGRectMake(0, h * 0.35, w * 0.55, h * 0.65), CGRectMake(w * 0.22, 0, w * 0.5, h * 0.9),
-                      CGRectMake(w * 0.45, h * 0.3, w * 0.55, h * 0.7)};
-    for (int i = 0; i < 3; i++) {
-        UIView *p = [[UIView alloc] initWithFrame:parts[i]];
-        p.backgroundColor = [UIColor colorWithWhite:1 alpha:0.20];
-        p.layer.cornerRadius = parts[i].size.height / 2;
-        [v addSubview:p];
-    }
-    return v;
-}
-
-static UIColor *ZXAccent(void) { return [UIColor colorWithRed:0.05 green:0.55 blue:0.40 alpha:1]; } // 3.9:1 on white
-static BOOL ZXReduceMotion(void) { return UIAccessibilityIsReduceMotionEnabled(); }
-static BOOL ZXReduceTransparency(void) { return UIAccessibilityIsReduceTransparencyEnabled(); }
-
-@interface ZXToggle : UIControl
-@property (nonatomic, assign) BOOL on;
-- (void)setOn:(BOOL)on animated:(BOOL)animated;
+@interface ZXHiddenChatsViewController : UITableViewController
+@property (nonatomic, strong) NSArray<NSDictionary *> *chats;
 @end
 
-@implementation ZXToggle {
-    UIView *_knob;
-}
-- (instancetype)init
-{
-    self = [super initWithFrame:CGRectMake(0, 0, 58, 32)];
-    if (self) {
-        self.layer.cornerRadius = 16;
-        _knob = [[UIView alloc] initWithFrame:CGRectMake(3, 3, 26, 26)];
-        _knob.backgroundColor = UIColor.whiteColor;
-        _knob.layer.cornerRadius = 13;
-        _knob.layer.shadowColor = UIColor.blackColor.CGColor;
-        _knob.layer.shadowOpacity = 0.28;
-        _knob.layer.shadowRadius = 3;
-        _knob.layer.shadowOffset = CGSizeMake(0, 2);
-        _knob.userInteractionEnabled = NO;
-        [self addSubview:_knob];
-        self.isAccessibilityElement = YES;
-        self.accessibilityTraits = UIAccessibilityTraitButton;
-        [self applyState];
-    }
-    return self;
-}
-- (CGSize)intrinsicContentSize { return CGSizeMake(58, 32); }
-- (NSString *)accessibilityValue { return self.on ? @"Bật" : @"Tắt"; }
-- (BOOL)accessibilityActivate
-{
-    [self setOn:!self.on animated:YES];
-    [self sendActionsForControlEvents:UIControlEventValueChanged];
-    return YES;
-}
-- (void)applyState
-{
-    self.backgroundColor = self.on ? ZXAccent() : [UIColor colorWithRed:0.45 green:0.47 blue:0.52 alpha:1];
-    CGFloat kw = _knob.bounds.size.width;
-    _knob.frame = CGRectMake(self.on ? self.bounds.size.width - kw - 3 : 3, 3, kw, 26);
-}
-- (void)setOn:(BOOL)on { [self setOn:on animated:NO]; }
-- (void)setOn:(BOOL)on animated:(BOOL)animated
-{
-    _on = on;
-    if (!animated) { [self applyState]; return; }
-    if (ZXReduceMotion()) {
-        [UIView animateWithDuration:0.15 animations:^{ [self applyState]; self.transform = CGAffineTransformIdentity; }];
-        return;
-    }
-    [UIView animateWithDuration:0.45 delay:0 usingSpringWithDamping:0.58 initialSpringVelocity:0.9
-                        options:UIViewAnimationOptionAllowUserInteraction | UIViewAnimationOptionBeginFromCurrentState
-                     animations:^{
-        [self applyState];
-        self.transform = CGAffineTransformIdentity;
-    } completion:nil];
-}
-- (BOOL)beginTrackingWithTouch:(UITouch *)t withEvent:(UIEvent *)e
-{
-    [UIView animateWithDuration:0.15 animations:^{
-        self->_knob.frame = CGRectMake(self->_knob.frame.origin.x - (self.on ? 6 : 0), 3, 32, 26);
-        self.transform = CGAffineTransformMakeScale(0.94, 0.94);
-    }];
-    return YES;
-}
-- (void)endTrackingWithTouch:(UITouch *)t withEvent:(UIEvent *)e
-{
-    CGPoint pt = [t locationInView:self];
-    CGRect hit = CGRectInset(self.bounds, -12, -12);
-    CGRect kf = _knob.frame; kf.size.width = 26; _knob.frame = kf;
-    if (CGRectContainsPoint(hit, pt)) {
-        UIImpactFeedbackGenerator *h = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
-        [h impactOccurred];
-        [self setOn:!self.on animated:YES];
-        [self sendActionsForControlEvents:UIControlEventValueChanged];
-    } else {
-        [self setOn:self.on animated:YES];
-    }
-}
-- (void)cancelTrackingWithEvent:(UIEvent *)e
-{
-    CGRect kf = _knob.frame; kf.size.width = 26; _knob.frame = kf;
-    [self setOn:self.on animated:YES];
-}
-@end
-
-#define ZXK_LIQUID_GLASS @"liquid_glass_menu"
-
-static NSString *ZXBackgroundPath(void)
-{
-    return [[ZXConfig dataDir] stringByAppendingPathComponent:@"menu_bg.jpg"];
-}
-
-static UIVisualEffect *ZXGlassEffect(void);
-static BOOL ZXGlassOn(void);
-static void ZXHookFloatingTabBar(void);
-static BOOL ZXFloatingTabBarOn(void);
-static void ZXNoteTabBarInteraction(UIView *bar); // resets the auto-collapse idle timer, if attached
-
-@interface ZXCardCell : UITableViewCell
-- (void)applyCardStyle;
-@end
-
-@implementation ZXCardCell
-- (instancetype)initWithStyle:(UITableViewCellStyle)style reuseIdentifier:(NSString *)rid
-{
-    self = [super initWithStyle:style reuseIdentifier:rid];
-    if (self) {
-        if (@available(iOS 13.0, *)) self.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
-        if (@available(iOS 14.0, *)) {
-            self.automaticallyUpdatesBackgroundConfiguration = NO;
-            self.backgroundConfiguration = [UIBackgroundConfiguration clearConfiguration];
-        }
-        self.contentView.backgroundColor = UIColor.clearColor;
-        self.layer.cornerRadius = 18;
-        if (@available(iOS 13.0, *)) self.layer.cornerCurve = kCACornerCurveContinuous;
-        self.layer.masksToBounds = YES;
-        self.selectedBackgroundView = [UIView new];
-        self.selectedBackgroundView.backgroundColor = [UIColor colorWithRed:0.10 green:0.75 blue:0.55 alpha:0.25];
-        self.textLabel.backgroundColor = UIColor.clearColor;
-        self.textLabel.textColor = UIColor.whiteColor;
-        self.textLabel.font = [UIFontMetrics.defaultMetrics scaledFontForFont:[UIFont systemFontOfSize:17 weight:UIFontWeightSemibold]];
-        self.textLabel.adjustsFontForContentSizeCategory = YES;
-        self.detailTextLabel.backgroundColor = UIColor.clearColor;
-        self.detailTextLabel.textColor = [UIColor colorWithWhite:0.90 alpha:1.0];
-        self.detailTextLabel.font = [UIFontMetrics.defaultMetrics scaledFontForFont:[UIFont systemFontOfSize:13]];
-        self.detailTextLabel.adjustsFontForContentSizeCategory = YES;
-        [self applyCardStyle];
-    }
-    return self;
-}
-/// UITableView resets cell.backgroundColor right before display, so this is called again from willDisplayCell and layoutSubviews.
-/// Always uses a dark high-contrast card background so white title/subtitle text stays crisp and never turns white-on-white.
-- (void)applyCardStyle
-{
-    if (@available(iOS 14.0, *)) {
-        self.automaticallyUpdatesBackgroundConfiguration = NO;
-        self.backgroundConfiguration = [UIBackgroundConfiguration clearConfiguration];
-    }
-    self.contentView.backgroundColor = UIColor.clearColor;
-    self.textLabel.backgroundColor = UIColor.clearColor;
-    self.detailTextLabel.backgroundColor = UIColor.clearColor;
-    if (ZXGlassOn()) {
-        self.backgroundColor = [UIColor colorWithRed:0.06 green:0.10 blue:0.18 alpha:0.68];
-        if (![self.backgroundView isKindOfClass:[UIVisualEffectView class]]) {
-            UIVisualEffectView *ev = [[UIVisualEffectView alloc] initWithEffect:ZXGlassEffect()];
-            ev.backgroundColor = [UIColor colorWithRed:0.06 green:0.10 blue:0.18 alpha:0.55];
-            ev.contentView.backgroundColor = [UIColor colorWithRed:0.06 green:0.10 blue:0.18 alpha:0.45];
-            ev.layer.cornerRadius = 18;
-            if (@available(iOS 13.0, *)) ev.layer.cornerCurve = kCACornerCurveContinuous;
-            ev.clipsToBounds = YES;
-            self.backgroundView = ev;
-        }
-    } else {
-        self.backgroundView = nil;
-        self.backgroundColor = [UIColor colorWithRed:0.08 green:0.13 blue:0.22 alpha:0.94];
-    }
-    self.textLabel.textColor = UIColor.whiteColor;
-    self.detailTextLabel.textColor = [UIColor colorWithWhite:0.90 alpha:1.0];
-}
-- (void)layoutSubviews
-{
-    [super layoutSubviews];
-    self.contentView.backgroundColor = UIColor.clearColor;
-    self.textLabel.textColor = UIColor.whiteColor;
-    self.detailTextLabel.textColor = [UIColor colorWithWhite:0.90 alpha:1.0];
-}
-- (void)setFrame:(CGRect)frame
-{
-    [super setFrame:CGRectInset(frame, 14, 4)];
-}
-- (void)setHighlighted:(BOOL)highlighted animated:(BOOL)animated
-{
-    [super setHighlighted:highlighted animated:animated];
-    if (ZXReduceMotion()) return;
-    [UIView animateWithDuration:0.18 delay:0 usingSpringWithDamping:0.7 initialSpringVelocity:0
-                        options:UIViewAnimationOptionAllowUserInteraction animations:^{
-        self.transform = highlighted ? CGAffineTransformMakeScale(0.97, 0.97) : CGAffineTransformIdentity;
-    } completion:nil];
-}
-@end
-
-// ---------------------------------------------------------------- settings table
-
-static NSArray<NSDictionary *> *ZXCategories(void)
-{
-    return @[
-        @{ @"title": @"Quyền riêng tư", @"icon": @"eye.slash", @"desc": @"Ẩn đã xem, đang nhập", @"items": @[
-            @{ @"key": ZXK_BLOCK_SEEN, @"title": @"Chặn trạng thái \"Đã xem\"", @"sub": @"Người gửi không thấy bạn đã đọc tin", @"kw": @"seen ghost đã đọc xem" },
-            @{ @"key": ZXK_SILENT_TYPING, @"title": @"Ẩn trạng thái \"Đang nhập\"", @"sub": @"Người nhận không thấy bạn đang soạn tin", @"kw": @"typing đang soạn gõ" },
-        ]},
-        @{ @"title": @"Tin thu hồi & xóa", @"icon": @"arrow.uturn.backward.circle", @"desc": @"Giữ lại tin bị thu hồi", @"items": @[
-            @{ @"key": ZXK_ANTI_RECALL, @"title": @"Giữ tin bị thu hồi", @"sub": @"Tin vẫn hiện khi người khác thu hồi", @"kw": @"anti recall chống thu hồi" },
-            @{ @"key": ZXK_SHOW_CONTENT, @"title": @"Hiện nội dung tin bị thu hồi/xóa", @"sub": @"Lưu tạm nội dung tin nhận được trên máy" },
-            @{ @"key": ZXK_RECALL_NOTE, @"title": @"Nhãn \"đã thu hồi\" trên tin", @"sub": @"Hiện chữ nhỏ mờ trong khung tin được giữ lại" },
-            @{ @"key": ZXK_ANTI_RECALL_INCLUDE_ME, @"title": @"Áp dụng cả tin do mình thu hồi" },
-            @{ @"key": ZXK_ANTI_DELETE, @"title": @"Giữ tin bị xóa", @"sub": @"Cần xác nhận hoạt động trên máy bạn", @"kw": @"anti delete chống xóa" },
-            @{ @"key": ZXK_ANTI_DELETE_INCLUDE_ME, @"title": @"Áp dụng cả tin do mình xóa" },
-            @{ @"action": @"history", @"title": @"Lịch sử tin bị thu hồi / xóa" },
-            @{ @"action": @"clearmarks", @"title": @"Xóa danh sách tin đã đánh dấu" },
-            @{ @"action": @"clearcache", @"title": @"Xóa bộ nhớ đệm tin nhắn" },
-            @{ @"action": @"uid", @"title": @"User ID của bạn", @"sub": @"Dùng để phân biệt tin của mình" },
-        ]},
-        @{ @"title": @"Quảng cáo & theo dõi", @"icon": @"shield.lefthalf.filled", @"desc": @"Chặn quảng cáo, log", @"items": @[
-            @{ @"key": ZXK_BLOCK_ADS, @"title": @"Chặn quảng cáo", @"sub": @"Chặn các máy chủ quảng cáo của Zalo", @"kw": @"ads ad" },
-            @{ @"key": ZXK_DISABLE_TRACKING, @"title": @"Tắt theo dõi (tracking)", @"sub": @"Không gửi log hành vi về Zalo" },
-            @{ @"key": ZXK_BLOCK_QOS, @"title": @"Chặn log chất lượng (QoS)" },
-            @{ @"key": ZXK_DISABLE_FIREBASE, @"title": @"Tắt Firebase logging" },
-        ]},
-        @{ @"title": @"Ảnh, file & tự hủy", @"icon": @"photo.on.rectangle", @"desc": @"Original, file lớn, TTL", @"items": @[
-            @{ @"key": ZXK_DEFAULT_ORIGINAL, @"title": @"Gửi ảnh Original mặc định", @"sub": @"Chọn sẵn chất lượng gốc khi mở bảng chế độ gửi", @"kw": @"hd chất lượng ảnh" },
-            @{ @"key": ZXK_VIDEO_ORIGINAL, @"title": @"Gửi video giữ nguyên gốc (thử nghiệm)", @"sub": @"Bỏ bước nén lại video. Tắt nếu gửi video bị lỗi. Cần thoát app để áp dụng", @"kw": @"video hd chất lượng" },
-            @{ @"key": ZXK_UNLIMITED_MEDIA, @"title": @"Nâng giới hạn dung lượng gửi", @"sub": @"Gửi file/ảnh lớn hơn mức mặc định", @"kw": @"file size không giới hạn" },
-            @{ @"key": ZXK_TTL_OVERRIDE, @"title": @"Đặt thời gian tự hủy (TTL)", @"sub": @"Áp dụng cho tin bạn gửi", @"kw": @"ttl tự hủy" },
-            @{ @"action": @"ttl", @"title": @"Giá trị TTL (ms)" },
-        ]},
-        @{ @"title": @"Giao diện", @"icon": @"paintbrush", @"desc": @"Nền, kính, hiệu ứng", @"items": @[
-            @{ @"key": ZXK_LIQUID_GLASS, @"title": @"Liquid Glass", @"sub": @"Ô menu, nút Thu gọn/Xong và các hàng tính năng dùng kính trong suốt", @"kw": @"kính glass" },
-            @{ @"key": ZXK_FLOATING_TABBAR, @"title": @"Thanh tab nổi, kính lỏng (thử nghiệm)", @"sub": @"Biến thanh Tin nhắn/Danh bạ/… dưới cùng thành thanh nổi bo tròn, kính trong suốt. Có thể chưa đổi ngay, quay lại màn hình chính hoặc thoát app để thấy", @"kw": @"tabbar floating pill kính lỏng" },
-            @{ @"action": @"tabbaridle", @"title": @"Thời gian tự thu gọn thanh tab (giây)", @"sub": @"Không chạm vào thanh tab bao lâu thì tự co lại thành nút tròn. Để 0 để tắt tự thu gọn", @"kw": @"tabbar idle thu gọn collapse giây" },
-            @{ @"action": @"bgpick", @"title": @"Đổi ảnh nền", @"sub": @"Chọn ảnh từ thư viện, kéo và thu phóng để cắt", @"kw": @"background wallpaper" },
-            @{ @"action": @"bgreset", @"title": @"Dùng lại nền phong cảnh" },
-        ]},
-        @{ @"title": @"Công cụ nâng cao", @"icon": @"wrench.and.screwdriver", @"desc": @"Quét, rules, log", @"footer": @YES, @"items": @[
-            @{ @"action": @"scan", @"title": @"Quét class/method", @"sub": @"Tìm hàm có thể hook" },
-            @{ @"action": @"viewscan", @"title": @"Xem / chia sẻ kết quả quét" },
-            @{ @"action": @"rules", @"title": @"Sửa rules.json" },
-            @{ @"action": @"log", @"title": @"Xem log" },
-            @{ @"action": @"exit", @"title": @"Thoát app để áp dụng rules mới" },
-        ]},
-    ];
-}
-
-/// Landscape (or user-chosen) backdrop shared by every screen of the menu.
-static UIView *ZXMakeBackdrop(void)
-{
-    UIImage *custom = [UIImage imageWithContentsOfFile:ZXBackgroundPath()];
-    if (custom) {
-        UIImageView *bg = [[UIImageView alloc] initWithImage:custom];
-        bg.contentMode = UIViewContentModeScaleAspectFill;
-        bg.clipsToBounds = YES;
-        UIView *dim = [[UIView alloc] initWithFrame:UIScreen.mainScreen.bounds];
-        dim.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-        dim.backgroundColor = [UIColor colorWithWhite:0 alpha:0.22];
-        [bg addSubview:dim];
-        return bg;
-    }
-    UIImageView *bg = [[UIImageView alloc] initWithImage:ZXLandscapeImage(UIScreen.mainScreen.bounds.size)];
-    bg.contentMode = UIViewContentModeScaleAspectFill;
-    bg.clipsToBounds = YES;
-    CGFloat cw[] = {150, 110, 190};
-    CGFloat cy[] = {0.14, 0.26, 0.38};
-    CGFloat dur[] = {26, 34, 42};
-    CGFloat sw = UIScreen.mainScreen.bounds.size.width, sh = UIScreen.mainScreen.bounds.size.height;
-    for (int i = 0; i < 3; i++) {
-        UIView *cloud = ZXMakeCloud(cw[i]);
-        cloud.center = CGPointMake(sw * (0.2 + 0.3 * i), sh * cy[i]);
-        [bg addSubview:cloud];
-        CABasicAnimation *a = [CABasicAnimation animationWithKeyPath:@"transform.translation.x"];
-        a.fromValue = @(-50); a.toValue = @(70); a.duration = dur[i];
-        a.autoreverses = YES; a.repeatCount = HUGE_VALF;
-        a.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
-        if (!ZXReduceMotion()) [cloud.layer addAnimation:a forKey:@"drift"];
-    }
-    return bg;
-}
-
-static void ZXStyleNavBar(UINavigationBar *bar)
-{
-    bar.tintColor = UIColor.whiteColor;
-    if (@available(iOS 13.0, *)) {
-        NSDictionary *big = @{ NSForegroundColorAttributeName: UIColor.whiteColor };
-        NSDictionary *small = @{ NSForegroundColorAttributeName: UIColor.whiteColor,
-                                 NSFontAttributeName: [UIFont systemFontOfSize:17 weight:UIFontWeightSemibold] };
-        UINavigationBarAppearance *std = [UINavigationBarAppearance new];   // scrolled: blurred so content never runs under the title
-        if (ZXReduceTransparency()) {
-            [std configureWithOpaqueBackground];
-            std.backgroundColor = [UIColor colorWithRed:0.08 green:0.16 blue:0.34 alpha:1];
-        } else {
-            [std configureWithTransparentBackground];
-            std.backgroundEffect = [UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemChromeMaterialDark];
-        }
-        std.titleTextAttributes = small;
-        std.largeTitleTextAttributes = big;
-        UINavigationBarAppearance *edge = [UINavigationBarAppearance new]; // at rest: transparent over the landscape
-        [edge configureWithTransparentBackground];
-        edge.titleTextAttributes = small;
-        edge.largeTitleTextAttributes = big;
-        bar.standardAppearance = std;
-        bar.scrollEdgeAppearance = edge;
-        bar.compactAppearance = std;
-    }
-}
-
-@interface ZXSettingsViewController : UITableViewController <UIImagePickerControllerDelegate, UINavigationControllerDelegate>
-@property (nonatomic, strong) NSArray<NSDictionary *> *sections;
-@property (nonatomic, strong) NSMutableSet<NSIndexPath *> *shownRows;
-@property (nonatomic, assign) BOOL showHeaders;   // search results show one chip per category
-@property (nonatomic, assign) BOOL showFooter;    // credits, on the tools page
-- (instancetype)initWithSections:(NSArray<NSDictionary *> *)sections title:(NSString *)title;
-@end
-
-@implementation ZXSettingsViewController
-
-- (instancetype)initWithSections:(NSArray<NSDictionary *> *)sections title:(NSString *)title
-{
-    self = [super initWithStyle:UITableViewStyleGrouped];
-    if (self) {
-        self.title = title;
-        self.sections = sections ?: @[];
-    }
-    return self;
-}
-
-- (void)buildBackground
-{
-    self.tableView.backgroundView = ZXMakeBackdrop();
-}
-
-- (void)pickBackground
-{
-    UIImagePickerController *pk = [UIImagePickerController new];
-    pk.sourceType = UIImagePickerControllerSourceTypePhotoLibrary;
-    pk.allowsEditing = YES; // crop / move / zoom
-    pk.delegate = self;
-    [self presentViewController:pk animated:YES completion:nil];
-}
-- (void)imagePickerController:(UIImagePickerController *)picker didFinishPickingMediaWithInfo:(NSDictionary<UIImagePickerControllerInfoKey, id> *)info
-{
-    UIImage *img = info[UIImagePickerControllerEditedImage] ?: info[UIImagePickerControllerOriginalImage];
-    if (img) {
-        CGFloat maxSide = 1800, m = MAX(img.size.width, img.size.height);
-        if (m > maxSide) {
-            CGFloat k = maxSide / m;
-            CGSize ns = CGSizeMake(img.size.width * k, img.size.height * k);
-            UIGraphicsImageRenderer *r = [[UIGraphicsImageRenderer alloc] initWithSize:ns];
-            img = [r imageWithActions:^(UIGraphicsImageRendererContext *c) { [img drawInRect:CGRectMake(0, 0, ns.width, ns.height)]; }];
-        }
-        [UIImageJPEGRepresentation(img, 0.88) writeToFile:ZXBackgroundPath() atomically:YES];
-    }
-    [picker dismissViewControllerAnimated:YES completion:^{ [self buildBackground]; }];
-}
-- (void)imagePickerControllerDidCancel:(UIImagePickerController *)picker
-{
-    [picker dismissViewControllerAnimated:YES completion:nil];
-}
-
+@implementation ZXHiddenChatsViewController
 - (void)viewDidLoad
 {
     [super viewDidLoad];
-    self.shownRows = [NSMutableSet new];
     if (@available(iOS 13.0, *)) self.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
-    [self buildBackground];
-    self.tableView.backgroundColor = UIColor.clearColor;
-    self.tableView.separatorStyle = UITableViewCellSeparatorStyleNone;
-    self.tableView.showsVerticalScrollIndicator = NO;
-    self.tableView.keyboardDismissMode = UIScrollViewKeyboardDismissModeOnDrag;
+    self.title = @"Trò chuyện đang ẩn";
+    self.tableView.backgroundColor = ZXColorBgPrimary();
+    self.tableView.separatorColor = ZXColorCardBorder();
+    [self reloadChats];
 }
 - (void)viewWillAppear:(BOOL)animated
 {
     [super viewWillAppear:animated];
     ZXStyleNavBar(self.navigationController.navigationBar);
-    if (self.title.length) {
-        self.navigationController.navigationBar.prefersLargeTitles = YES;
-        self.navigationItem.largeTitleDisplayMode = UINavigationItemLargeTitleDisplayModeAlways;
+}
+- (void)reloadChats
+{
+    self.chats = [ZXHookEngine discoveredHiddenChats] ?: @[];
+    [self.tableView reloadData];
+}
+- (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section
+{
+    (void)tableView; (void)section;
+    return MAX(1, (NSInteger)self.chats.count);
+}
+- (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath
+{
+    UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:@"HiddenCell"];
+    if (!cell) {
+        cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:@"HiddenCell"];
+        if (@available(iOS 13.0, *)) cell.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
+        cell.backgroundColor = ZXColorCardBg();
+        cell.textLabel.textColor = UIColor.whiteColor;
+        cell.textLabel.font = [UIFont systemFontOfSize:15.5 weight:UIFontWeightBold];
+        cell.detailTextLabel.textColor = ZXColorTextSub();
+        cell.detailTextLabel.font = [UIFont systemFontOfSize:12.5];
+        cell.detailTextLabel.numberOfLines = 2;
     }
+    if (self.chats.count == 0) {
+        cell.textLabel.text = @"Chưa phát hiện cuộc trò chuyện ẩn nào";
+        cell.detailTextLabel.text = @"Hãy bật 'Tạm hiện tất cả chat bị ẩn' và cuộn danh sách tin nhắn Zalo để tự động thu thập.";
+        cell.accessoryType = UITableViewCellAccessoryNone;
+        return cell;
+    }
+    NSDictionary *c = self.chats[indexPath.row];
+    cell.textLabel.text = [NSString stringWithFormat:@"%@ (UID: %@)", c[@"name"] ?: @"Hội thoại", c[@"uid"] ?: @"?"];
+    cell.detailTextLabel.text = [NSString stringWithFormat:@"Tin cuối: %@", c[@"lastMessage"] ?: @"(Trống)"];
+    cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+    return cell;
+}
+- (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath
+{
+    [tableView deselectRowAtIndexPath:indexPath animated:YES];
+    if (self.chats.count == 0) return;
+    NSDictionary *c = self.chats[indexPath.row];
+    NSString *uid = [c[@"uid"] description] ?: @"";
+    NSString *name = [c[@"name"] description] ?: uid;
+
+    UIAlertController *sheet = [UIAlertController alertControllerWithTitle:name
+                                                                   message:[NSString stringWithFormat:@"UID: %@", uid]
+                                                            preferredStyle:UIAlertControllerStyleActionSheet];
+    if (@available(iOS 13.0, *)) sheet.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
+    [sheet addAction:[UIAlertAction actionWithTitle:@"💬 Mở thẳng khung chat" style:UIAlertActionStyleDefault handler:^(UIAlertAction *act) {
+        (void)act;
+        [self dismissViewControllerAnimated:YES completion:^{
+            [ZXHookEngine openChatWithID:uid];
+        }];
+    }]];
+    [sheet addAction:[UIAlertAction actionWithTitle:@"👁️ Bỏ ẩn nhanh hội thoại này" style:UIAlertActionStyleDefault handler:^(UIAlertAction *act) {
+        (void)act;
+        [ZXHookEngine unhideChatWithID:uid];
+        [self reloadChats];
+    }]];
+    [sheet addAction:[UIAlertAction actionWithTitle:@"Đóng" style:UIAlertActionStyleCancel handler:nil]];
+    sheet.popoverPresentationController.sourceView = [tableView cellForRowAtIndexPath:indexPath];
+    [self presentViewController:sheet animated:YES completion:nil];
+}
+@end
+
+// ---------------------------------------------------------------- Screen 2: Locked Chats Manager
+
+@interface ZXLockedChatsViewController : UITableViewController
+@property (nonatomic, strong) NSArray<NSDictionary *> *items;
+@end
+
+@implementation ZXLockedChatsViewController
+- (void)viewDidLoad
+{
+    [super viewDidLoad];
+    if (@available(iOS 13.0, *)) self.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
+    self.title = @"Danh sách chat bị khóa";
+    self.tableView.backgroundColor = ZXColorBgPrimary();
+    self.tableView.separatorColor = ZXColorCardBorder();
+    self.navigationItem.rightBarButtonItem = ZXMakeNavButton(@"plus.circle.fill", @"Thêm", ZXColorZaloRed(), self, @selector(addLockedChat));
+    [self reloadList];
+}
+- (void)viewWillAppear:(BOOL)animated
+{
+    [super viewWillAppear:animated];
+    ZXStyleNavBar(self.navigationController.navigationBar);
+}
+- (void)reloadList
+{
+    self.items = [ZXConfig lockedChats];
+    [self.tableView reloadData];
+}
+- (void)addLockedChat
+{
+    UIAlertController *a = [UIAlertController alertControllerWithTitle:@"Thêm phòng chat cần khóa"
+                                                               message:@"Nhập Tên hiển thị hoặc UID của phòng chat (hoặc nhấn giữ trực tiếp hội thoại ở danh sách chat Zalo)"
+                                                        preferredStyle:UIAlertControllerStyleAlert];
+    if (@available(iOS 13.0, *)) a.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
+    [a addTextFieldWithConfigurationHandler:^(UITextField *tf) {
+        tf.placeholder = @"Tên hiển thị hoặc UID...";
+    }];
+    [a addAction:[UIAlertAction actionWithTitle:@"Hủy" style:UIAlertActionStyleCancel handler:nil]];
+    [a addAction:[UIAlertAction actionWithTitle:@"Khóa" style:UIAlertActionStyleDefault handler:^(UIAlertAction *act) {
+        (void)act;
+        NSString *val = a.textFields.firstObject.text ?: @"";
+        if (val.length) {
+            [ZXConfig addLockedChatWithID:val name:val];
+            [ZXConfig setBool:YES forKey:ZXK_CHAT_LOCK_ENABLED];
+            [self reloadList];
+        }
+    }]];
+    [self presentViewController:a animated:YES completion:nil];
+}
+- (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section
+{
+    (void)tableView; (void)section;
+    return MAX(1, (NSInteger)self.items.count);
+}
+- (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath
+{
+    UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:@"LockCell"];
+    if (!cell) {
+        cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:@"LockCell"];
+        if (@available(iOS 13.0, *)) cell.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
+        cell.backgroundColor = ZXColorCardBg();
+        cell.textLabel.textColor = UIColor.whiteColor;
+        cell.textLabel.font = [UIFont systemFontOfSize:15.5 weight:UIFontWeightBold];
+        cell.detailTextLabel.textColor = ZXColorTextSub();
+    }
+    if (self.items.count == 0) {
+        cell.textLabel.text = @"Chưa có phòng chat nào bị khóa";
+        cell.detailTextLabel.text = @"Bấm nút '+ Thêm' ở góc trên hoặc nhấn giữ hội thoại ngoài danh sách chat Zalo để khóa.";
+        return cell;
+    }
+    NSDictionary *d = self.items[indexPath.row];
+    cell.textLabel.text = [NSString stringWithFormat:@"🔒 %@", d[@"name"] ?: d[@"id"]];
+    cell.detailTextLabel.text = [NSString stringWithFormat:@"ID/Tên khớp: %@ • Bấm để mở khóa (xóa khỏi danh sách)", d[@"id"]];
+    return cell;
+}
+- (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath
+{
+    [tableView deselectRowAtIndexPath:indexPath animated:YES];
+    if (self.items.count == 0) return;
+    NSDictionary *d = self.items[indexPath.row];
+    NSString *cid = [d[@"id"] description] ?: @"";
+    [ZXConfig removeLockedChatWithID:cid];
+    [self reloadList];
+}
+@end
+
+// ---------------------------------------------------------------- Screen 3: Call Recordings Manager
+
+@interface ZXCallRecordsViewController : UITableViewController
+@property (nonatomic, strong) NSArray<NSString *> *files;
+@property (nonatomic, strong) AVAudioPlayer *player;
+@end
+
+@implementation ZXCallRecordsViewController
+- (void)viewDidLoad
+{
+    [super viewDidLoad];
+    if (@available(iOS 13.0, *)) self.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
+    self.title = @"Bản ghi âm cuộc gọi";
+    self.tableView.backgroundColor = ZXColorBgPrimary();
+    self.tableView.separatorColor = ZXColorCardBorder();
+    [self updateNavBtn];
+    [self reloadFiles];
+}
+- (void)viewWillAppear:(BOOL)animated
+{
+    [super viewWillAppear:animated];
+    ZXStyleNavBar(self.navigationController.navigationBar);
+}
+- (void)updateNavBtn
+{
+    BOOL rec = [ZXHookEngine isCallRecording];
+    NSString *title = rec ? @"Dừng ghi" : @"Ghi âm ngay";
+    NSString *sym = rec ? @"stop.circle.fill" : @"record.circle.fill";
+    self.navigationItem.rightBarButtonItem = ZXMakeNavButton(sym, title, ZXColorZaloRed(), self, @selector(toggleRec));
+}
+- (void)toggleRec
+{
+    [ZXHookEngine toggleManualCallRecording];
+    [self updateNavBtn];
+    [self reloadFiles];
+}
+- (void)reloadFiles
+{
+    NSString *dir = [ZXConfig callRecordsDir];
+    NSArray *all = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:dir error:nil] ?: @[];
+    NSMutableArray *m4a = [NSMutableArray new];
+    for (NSString *f in all) {
+        if ([f.lowercaseString hasSuffix:@".m4a"] || [f.lowercaseString hasSuffix:@".caf"]) [m4a addObject:f];
+    }
+    [m4a sortUsingComparator:^NSComparisonResult(NSString *a, NSString *b) {
+        return [b compare:a];
+    }];
+    self.files = m4a;
+    [self.tableView reloadData];
+}
+- (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section
+{
+    (void)tableView; (void)section;
+    return MAX(1, (NSInteger)self.files.count);
+}
+- (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath
+{
+    UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:@"RecCell"];
+    if (!cell) {
+        cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:@"RecCell"];
+        if (@available(iOS 13.0, *)) cell.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
+        cell.backgroundColor = ZXColorCardBg();
+        cell.textLabel.textColor = UIColor.whiteColor;
+        cell.textLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightBold];
+        cell.detailTextLabel.textColor = ZXColorTextSub();
+    }
+    if (self.files.count == 0) {
+        cell.textLabel.text = @"Chưa có bản ghi âm nào";
+        cell.detailTextLabel.text = @"Thư mục: Documents/NTHE_CallRecords/ (.m4a)";
+        cell.accessoryType = UITableViewCellAccessoryNone;
+        return cell;
+    }
+    NSString *fn = self.files[indexPath.row];
+    NSString *path = [[ZXConfig callRecordsDir] stringByAppendingPathComponent:fn];
+    NSDictionary *attr = [[NSFileManager defaultManager] attributesOfItemAtPath:path error:nil];
+    double kb = [attr fileSize] / 1024.0;
+    cell.textLabel.text = [NSString stringWithFormat:@"🎙️ %@", fn];
+    cell.detailTextLabel.text = [NSString stringWithFormat:@"Dung lượng: %.1f KB • Bấm để Nghe lại / Chia sẻ / Xóa", kb];
+    cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+    return cell;
+}
+- (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath
+{
+    [tableView deselectRowAtIndexPath:indexPath animated:YES];
+    if (self.files.count == 0) return;
+    NSString *fn = self.files[indexPath.row];
+    NSString *path = [[ZXConfig callRecordsDir] stringByAppendingPathComponent:fn];
+    NSURL *url = [NSURL fileURLWithPath:path];
+
+    UIAlertController *sheet = [UIAlertController alertControllerWithTitle:fn message:nil preferredStyle:UIAlertControllerStyleActionSheet];
+    if (@available(iOS 13.0, *)) sheet.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
+    [sheet addAction:[UIAlertAction actionWithTitle:@"▶️ Nghe lại bản ghi âm" style:UIAlertActionStyleDefault handler:^(UIAlertAction *act) {
+        (void)act;
+        self.player = [[AVAudioPlayer alloc] initWithContentsOfURL:url error:nil];
+        [self.player prepareToPlay];
+        [self.player play];
+    }]];
+    [sheet addAction:[UIAlertAction actionWithTitle:@"📤 Chia sẻ / Lưu tệp .m4a" style:UIAlertActionStyleDefault handler:^(UIAlertAction *act) {
+        (void)act;
+        UIActivityViewController *av = [[UIActivityViewController alloc] initWithActivityItems:@[url] applicationActivities:nil];
+        if (@available(iOS 13.0, *)) av.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
+        av.popoverPresentationController.sourceView = [tableView cellForRowAtIndexPath:indexPath];
+        [self presentViewController:av animated:YES completion:nil];
+    }]];
+    [sheet addAction:[UIAlertAction actionWithTitle:@"🗑️ Xóa bản ghi âm" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *act) {
+        (void)act;
+        [[NSFileManager defaultManager] removeItemAtPath:path error:nil];
+        [self reloadFiles];
+    }]];
+    [sheet addAction:[UIAlertAction actionWithTitle:@"Đóng" style:UIAlertActionStyleCancel handler:nil]];
+    sheet.popoverPresentationController.sourceView = [tableView cellForRowAtIndexPath:indexPath];
+    [self presentViewController:sheet animated:YES completion:nil];
+}
+@end
+
+// ---------------------------------------------------------------- forward declarations for floating tabbar
+
+static void ZXHookFloatingTabBar(void);
+static BOOL ZXFloatingTabBarOn(void);
+static void ZXNoteTabBarInteraction(UIView *bar);
+static BOOL ZXReduceMotion(void) { return UIAccessibilityIsReduceMotionEnabled(); }
+static BOOL ZXReduceTransparency(void) { return UIAccessibilityIsReduceTransparencyEnabled(); }
+
+// ---------------------------------------------------------------- settings catalog
+
+static NSArray<NSDictionary *> *ZXAllSections(void)
+{
+    return @[
+        @{ @"title": @"GIAO DIỆN & NÚT NỔI", @"icon": @"paintbrush.fill", @"color": @(0xE53935), @"items": @[
+            @{ @"action": @"picklogo", @"title": @"Đổi ảnh nút nổi từ Thư viện", @"sub": @"Cắt tròn tự động, lưu vào Documents/nthe_custom_logo.png", @"icon": @"photo.circle.fill", @"color": @(0xE53935), @"kw": @"logo anh nut noi thu vien custom" },
+            @{ @"action": @"resetlogo", @"title": @"Khôi phục Logo Zalo Đỏ mặc định", @"sub": @"Dùng biểu tượng Zalo nền đỏ #E53935 vẽ bằng CoreGraphics", @"icon": @"arrow.counterclockwise.circle.fill", @"color": @(0xF97316), @"kw": @"khoi phuc mac dinh zalo do" },
+            @{ @"type": @"slider", @"title": @"Kích thước nút nổi", @"sub": @"Kéo để chỉnh độ lớn nút nổi ngay lập tức", @"icon": @"arrow.up.left.and.arrow.down.right.circle.fill", @"color": @(0xEF4444), @"kw": @"kich thuoc size nut noi slider" },
+            @{ @"key": ZXK_FLOATING_TABBAR, @"title": @"Thanh tab nổi bo tròn (thử nghiệm)", @"sub": @"Biến thanh Tin nhắn/Danh bạ dưới cùng thành thanh nổi hiện đại", @"icon": @"dock.rectangle", @"color": @(0x8B5CF6), @"kw": @"tabbar floating thanh tab noi" },
+            @{ @"action": @"tabbaridle", @"title": @"Thời gian tự thu gọn thanh tab (giây)", @"sub": @"Không chạm vào bao lâu thì tự co lại thành nút tròn (0 = tắt)", @"icon": @"timer", @"color": @(0x6366F1), @"kw": @"tabbar idle thu gon giay" },
+        ]},
+        @{ @"title": @"QUYỀN RIÊNG TƯ & BẢO MẬT CHAT", @"icon": @"eye.slash.fill", @"color": @(0x3B82F6), @"items": @[
+            @{ @"key": ZXK_BLOCK_SEEN, @"title": @"Chặn trạng thái \"Đã xem\"", @"sub": @"Người gửi không biết bạn đã đọc tin nhắn", @"icon": @"eye.slash.fill", @"color": @(0x3B82F6), @"kw": @"seen ghost da xem doc" },
+            @{ @"key": ZXK_SILENT_TYPING, @"title": @"Ẩn trạng thái \"Đang nhập\"", @"sub": @"Người nhận không thấy bạn đang soạn tin", @"icon": @"keyboard.fill", @"color": @(0x0EA5E9), @"kw": @"typing dang nhap soan go" },
+            @{ @"key": ZXK_GHOST_STORY, @"title": @"Xem Khoảnh khắc (Story) ẩn danh", @"sub": @"Chặn gửi gói tin xác nhận đã xem Story/Khoảnh khắc lên server", @"icon": @"sparkles.tv.fill", @"color": @(0x8B5CF6), @"kw": @"story khoanh khac an danh seen" },
+            @{ @"key": ZXK_UNHIDE_CHATS, @"title": @"Tạm hiện tất cả chat bị ẩn", @"sub": @"Hook isHiddenChat/filterHidden trả về NO để hiện lại trên danh sách chính", @"icon": @"eye.circle.fill", @"color": @(0x10B981), @"kw": @"tam hien chat an hidden conversation" },
+            @{ @"action": @"hidden_chats_list", @"title": @"Danh sách trò chuyện đang ẩn", @"sub": @"Xác thực Face ID / PIN để xem tên, UID, tin cuối và mở thẳng chat ẩn", @"icon": @"list.bullet.rectangle.portrait.fill", @"color": @(0x14B8A6), @"kw": @"danh sach tro chuyen dang an hidden list" },
+            @{ @"key": ZXK_CHAT_LOCK_ENABLED, @"title": @"Khóa phòng chat tự chọn (Face ID / PIN)", @"sub": @"Che mờ & yêu cầu Face ID / Mật khẩu khi mở phòng chat đã khóa", @"icon": @"lock.shield.fill", @"color": @(0xE53935), @"kw": @"khoa phong chat faceid pin lock" },
+            @{ @"action": @"set_lock_pin", @"title": @"Đặt / Đổi mã PIN dự phòng (4 số)", @"sub": @"Dùng để mở khóa chat và xem danh sách chat ẩn khi không dùng Face ID", @"icon": @"key.fill", @"color": @(0xF59E0B), @"kw": @"ma pin 4 so du phong" },
+            @{ @"action": @"locked_chats_list", @"title": @"Danh sách chat bị khóa", @"sub": @"Thêm/xóa phòng chat cần khóa (hoặc nhấn giữ hội thoại ở danh sách chat)", @"icon": @"lock.rectangle.stack.fill", @"color": @(0xEF4444), @"kw": @"danh sach chat bi khoa locked" },
+        ]},
+        @{ @"title": @"CÔNG CỤ CHAT", @"icon": @"bubble.left.and.bubble.right.fill", @"color": @(0xF97316), @"items": @[
+            @{ @"key": ZXK_MSG_REPEATER, @"title": @"Gửi tin nhắn lặp lại (Message Repeater)", @"sub": @"Hiện nút lặp lại cạnh nút Gửi trong khung chat kèm tùy chỉnh độ trễ", @"icon": @"repeat.circle.fill", @"color": @(0xE53935), @"kw": @"gui tin nhan lap lai repeater spam delay" },
+            @{ @"action": @"open_repeater", @"title": @"Mở bảng Gửi tin nhắn lặp lại ngay", @"sub": @"Nhập nội dung, số lần gửi (mặc định 5) và độ trễ giây (mặc định 0.5s)", @"icon": @"paperplane.circle.fill", @"color": @(0xF97316), @"kw": @"mo bang gui tin lap lai" },
+        ]},
+        @{ @"title": @"CUỘC GỌI & ÂM THANH", @"icon": @"phone.waves.left.and.right", @"color": @(0x06B6D4), @"items": @[
+            @{ @"key": ZXK_CALL_FORCE_RELAY, @"title": @"Bảo vệ IP cuộc gọi (Force Relay)", @"sub": @"Ép kết nối WebRTC/Zalo Call qua máy chủ Relay, chặn P2P/STUN lộ IP thật", @"icon": @"network.badge.shield.half.filled", @"color": @(0x06B6D4), @"kw": @"bao ve ip cuoc goi force relay webrtc stun p2p" },
+            @{ @"key": ZXK_AUTO_CALL_RECORD, @"title": @"Ghi âm cuộc gọi tự động (.m4a)", @"sub": @"Tự động ghi âm cuộc gọi thoại Zalo lưu vào Documents/NTHE_CallRecords/", @"icon": @"waveform.circle.fill", @"color": @(0xE53935), @"kw": @"ghi am cuoc goi tu dong call record m4a" },
+            @{ @"action": @"call_records_list", @"title": @"Danh sách bản ghi âm cuộc gọi", @"sub": @"Nghe lại, ghi âm thử hoặc chia sẻ các tệp .m4a đã lưu", @"icon": @"folder.fill.badge.waveform", @"color": @(0xF59E0B), @"kw": @"danh sach ban ghi am" },
+            @{ @"key": ZXK_VOICE_MSG_TOOLS, @"title": @"Tốc độ & Lưu tin nhắn thoại", @"sub": @"Cho phép phát tốc độ 1.0x/1.5x/2.0x và lưu tệp âm thanh gốc khi nhấn giữ", @"icon": @"speedometer", @"color": @(0x10B981), @"kw": @"toc do luu tin nhan thoai voice speed audio" },
+            @{ @"action": @"voice_speed_menu", @"title": @"Chỉnh tốc độ phát & Lưu thoại gần nhất", @"sub": @"Chọn nhanh 1.0x, 1.5x, 2.0x hoặc xuất file tin nhắn thoại vừa nghe", @"icon": @"slider.horizontal.below.waveform", @"color": @(0x14B8A6), @"kw": @"chinh toc do phat 1.5x 2.0x" },
+        ]},
+        @{ @"title": @"TIN THU HỒI & TIN XÓA", @"icon": @"arrow.uturn.backward.circle.fill", @"color": @(0x10B981), @"items": @[
+            @{ @"key": ZXK_ANTI_RECALL, @"title": @"Giữ tin bị thu hồi", @"sub": @"Tin vẫn hiển thị trong khung chat khi đối phương thu hồi", @"icon": @"shield.checkered", @"color": @(0x10B981), @"kw": @"anti recall chong thu hoi" },
+            @{ @"key": ZXK_SHOW_CONTENT, @"title": @"Hiện nội dung tin bị thu hồi/xóa", @"sub": @"Lưu tạm nội dung tin nhắn nhận được trên thiết bị", @"icon": @"text.bubble.fill", @"color": @(0x14B8A6), @"kw": @"noi dung thu hoi xoa" },
+            @{ @"key": ZXK_RECALL_NOTE, @"title": @"Nhãn \"đã thu hồi\" trên tin", @"sub": @"Hiện ghi chú nhỏ trong bong bóng tin nhắn được giữ lại", @"icon": @"tag.fill", @"color": @(0x059669), @"kw": @"nhan label da thu hoi" },
+            @{ @"key": ZXK_ANTI_RECALL_INCLUDE_ME, @"title": @"Áp dụng cả tin do mình thu hồi", @"sub": @"Giữ lại luôn tin nhắn do chính bạn thu hồi", @"icon": @"person.crop.circle.badge.checkmark", @"color": @(0x10B981), @"kw": @"minh thu hoi" },
+            @{ @"key": ZXK_ANTI_DELETE, @"title": @"Giữ tin bị xóa", @"sub": @"Ngăn xóa tin nhắn phía máy của bạn", @"icon": @"trash.slash.fill", @"color": @(0x22C55E), @"kw": @"anti delete chong xoa" },
+            @{ @"key": ZXK_ANTI_DELETE_INCLUDE_ME, @"title": @"Áp dụng cả tin do mình xóa", @"sub": @"Giữ lại luôn tin nhắn do chính bạn bấm xóa", @"icon": @"person.fill.checkmark", @"color": @(0x16A34A), @"kw": @"minh xoa" },
+            @{ @"action": @"history", @"title": @"Lịch sử tin bị thu hồi / xóa", @"sub": @"Xem danh sách toàn bộ tin nhắn đã bắt được", @"icon": @"clock.arrow.circlepath", @"color": @(0x0EA5E9), @"kw": @"lich su history" },
+            @{ @"action": @"clearmarks", @"title": @"Xóa danh sách tin đã đánh dấu", @"sub": @"Làm sạch các nhãn đã thu hồi trên khung chat", @"icon": @"sparkles", @"color": @(0xF59E0B), @"kw": @"xoa danh dau clear marks" },
+            @{ @"action": @"clearcache", @"title": @"Xóa bộ nhớ đệm tin nhắn", @"sub": @"Dọn dữ liệu tin nhắn lưu tạm trên máy", @"icon": @"internaldrive.fill", @"color": @(0xF97316), @"kw": @"xoa cache bo nho dem" },
+            @{ @"action": @"uid", @"title": @"User ID Zalo của bạn", @"sub": @"Dùng để phân biệt tin nhắn của bạn và người khác", @"icon": @"person.text.rectangle.fill", @"color": @(0x6366F1), @"kw": @"uid user id" },
+        ]},
+        @{ @"title": @"QUẢNG CÁO & THEO DÕI", @"icon": @"shield.lefthalf.filled", @"color": @(0xF59E0B), @"items": @[
+            @{ @"key": ZXK_BLOCK_ADS, @"title": @"Chặn quảng cáo Zalo", @"sub": @"Chặn kết nối tới các máy chủ phân phối quảng cáo", @"icon": @"hand.raised.fill", @"color": @(0xEF4444), @"kw": @"ads quang cao chan" },
+            @{ @"key": ZXK_DISABLE_TRACKING, @"title": @"Tắt theo dõi hành vi (Tracking)", @"sub": @"Không gửi dữ liệu phân tích thao tác về máy chủ", @"icon": @"location.slash.fill", @"color": @(0xF59E0B), @"kw": @"tracking theo doi" },
+            @{ @"key": ZXK_BLOCK_QOS, @"title": @"Chặn báo cáo chất lượng (QoS)", @"sub": @"Giảm lưu lượng ngầm gửi định kỳ của ứng dụng", @"icon": @"antenna.radiowaves.left.and.right.slash", @"color": @(0xEAB308), @"kw": @"qos log" },
+            @{ @"key": ZXK_DISABLE_FIREBASE, @"title": @"Tắt Firebase Analytics", @"sub": @"Vô hiệu hóa thu thập thống kê Firebase", @"icon": @"flame.fill", @"color": @(0xF97316), @"kw": @"firebase logging" },
+        ]},
+        @{ @"title": @"ẢNH, VIDEO, FILE & TỰ HỦY", @"icon": @"photo.on.rectangle.angled", @"color": @(0xEC4899), @"items": @[
+            @{ @"key": ZXK_DEFAULT_ORIGINAL, @"title": @"Gửi ảnh chất lượng gốc (Original)", @"sub": @"Tự động bật chế độ ảnh gốc khi chọn ảnh gửi đi", @"icon": @"photo.fill", @"color": @(0xEC4899), @"kw": @"hd original anh goc" },
+            @{ @"key": ZXK_VIDEO_ORIGINAL, @"title": @"Gửi video giữ nguyên gốc (thử nghiệm)", @"sub": @"Bỏ qua bước nén giảm chất lượng video khi gửi", @"icon": @"video.fill", @"color": @(0xD946EF), @"kw": @"video hd original" },
+            @{ @"key": ZXK_UNLIMITED_MEDIA, @"title": @"Mở khóa giới hạn dung lượng gửi", @"sub": @"Cho phép đính kèm file và media dung lượng lớn", @"icon": @"externaldrive.fill.badge.plus", @"color": @(0xA855F7), @"kw": @"file size dung luong" },
+            @{ @"key": ZXK_TTL_OVERRIDE, @"title": @"Bật thời gian tự hủy tin nhắn (TTL)", @"sub": @"Áp dụng thời gian tự hủy tùy chỉnh cho tin bạn gửi", @"icon": @"hourglass", @"color": @(0xF43F5E), @"kw": @"ttl tu huy" },
+            @{ @"action": @"ttl", @"title": @"Đặt giá trị TTL (mili-giây)", @"sub": @"Nhập số ms tin nhắn tự hủy (ví dụ: 60000 = 1 phút)", @"icon": @"slider.horizontal.3", @"color": @(0xEC4899), @"kw": @"ttl ms gia tri" },
+        ]},
+        @{ @"title": @"CÔNG CỤ NÂNG CAO", @"icon": @"wrench.and.screwdriver.fill", @"color": @(0x64748B), @"items": @[
+            @{ @"action": @"scan", @"title": @"Quét Class / Method Runtime", @"sub": @"Dò danh sách hàm nội bộ của Zalo để viết hook", @"icon": @"magnifyingglass.circle.fill", @"color": @(0x3B82F6), @"kw": @"scan quet class method" },
+            @{ @"action": @"viewscan", @"title": @"Xem & Chia sẻ kết quả quét", @"sub": @"Mở hoặc xuất tệp scan.txt", @"icon": @"square.and.arrow.up.fill", @"color": @(0x0EA5E9), @"kw": @"view scan chia se" },
+            @{ @"action": @"rules", @"title": @"Trình sửa rules.json", @"sub": @"Chỉnh sửa quy tắc hook trực tiếp trong ứng dụng", @"icon": @"curlybraces.square.fill", @"color": @(0x10B981), @"kw": @"rules json hook" },
+            @{ @"action": @"log", @"title": @"Xem nhật ký hoạt động (log.txt)", @"sub": @"Kiểm tra trạng thái các hook đang chạy", @"icon": @"doc.text.magnifyingglass", @"color": @(0xF59E0B), @"kw": @"log nhat ky" },
+            @{ @"action": @"exit", @"title": @"Khởi động lại Zalo", @"sub": @"Đóng ứng dụng ngay để nạp lại toàn bộ cấu hình mới", @"icon": @"power.circle.fill", @"color": @(0xE53935), @"kw": @"exit thoat khoi dong lai" },
+        ]},
+    ];
 }
 
-- (NSInteger)numberOfSectionsInTableView:(UITableView *)tv { return self.sections.count; }
-- (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)s { return [self.sections[s][@"items"] count]; }
-- (UIView *)tableView:(UITableView *)tv viewForHeaderInSection:(NSInteger)s
+static UIColor *ZXColorFromHex(NSUInteger hex, CGFloat alpha)
 {
-    if (!self.showHeaders) return nil;
-    UIView *v = [[UIView alloc] initWithFrame:CGRectMake(0, 0, tv.bounds.size.width, 44)];
-    UILabel *l = [UILabel new];
-    l.text = [self.sections[s][@"title"] uppercaseString];
-    l.font = [UIFontMetrics.defaultMetrics scaledFontForFont:[UIFont systemFontOfSize:12 weight:UIFontWeightHeavy]];
-    l.adjustsFontForContentSizeCategory = YES;
-    l.textColor = UIColor.whiteColor;
-    l.numberOfLines = 0;
-    CGFloat maxW = tv.bounds.size.width - 40 - 24;
-    CGSize ls = [l sizeThatFits:CGSizeMake(maxW, CGFLOAT_MAX)];
-    CGRect chip = CGRectMake(20, 10, MIN(ls.width, maxW) + 24, ls.height + 12);
-    UIView *bgv;
-    if (ZXReduceTransparency()) {
-        bgv = [[UIView alloc] initWithFrame:chip];
-        bgv.backgroundColor = [UIColor colorWithRed:0.05 green:0.10 blue:0.22 alpha:1];
-    } else if ([ZXConfig boolForKey:ZXK_LIQUID_GLASS]) {
-        UIVisualEffect *eff = nil;
-        Class gc = NSClassFromString(@"UIGlassEffect");   // iOS 26+
-        if (gc) eff = [[gc alloc] init];
-        if (!eff) eff = [UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThinMaterialDark];
-        UIVisualEffectView *ev = [[UIVisualEffectView alloc] initWithEffect:eff];
-        ev.frame = chip;
-        bgv = ev;
-    } else {
-        bgv = [[UIView alloc] initWithFrame:chip];
-        bgv.backgroundColor = [UIColor colorWithWhite:0 alpha:0.45];                      // white on this chip ≥ 7:1
+    CGFloat r = ((hex >> 16) & 0xFF) / 255.0;
+    CGFloat g = ((hex >> 8) & 0xFF) / 255.0;
+    CGFloat b = (hex & 0xFF) / 255.0;
+    return [UIColor colorWithRed:r green:g blue:b alpha:alpha];
+}
+
+// ---------------------------------------------------------------- Modern Grouped Row Cell
+
+@interface ZXModernRowCell : UITableViewCell
+@property (nonatomic, strong) UIView *cardContainer;
+@property (nonatomic, strong) UIView *iconBadge;
+@property (nonatomic, strong) UIImageView *iconView;
+@property (nonatomic, strong) UILabel *titleLabel;
+@property (nonatomic, strong) UILabel *subtitleLabel;
+@property (nonatomic, strong) UISwitch *toggleSwitch;
+@property (nonatomic, strong) UIImageView *chevronView;
+@property (nonatomic, strong) UISlider *sizeSlider;
+@property (nonatomic, strong) UILabel *valueBadgeLabel;
+@end
+
+@implementation ZXModernRowCell
+
+- (instancetype)initWithStyle:(UITableViewCellStyle)style reuseIdentifier:(NSString *)reuseIdentifier
+{
+    self = [super initWithStyle:style reuseIdentifier:reuseIdentifier];
+    if (!self) return nil;
+
+    if (@available(iOS 13.0, *)) self.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
+    if (@available(iOS 14.0, *)) {
+        self.automaticallyUpdatesBackgroundConfiguration = NO;
+        self.backgroundConfiguration = [UIBackgroundConfiguration clearConfiguration];
     }
-    bgv.layer.cornerRadius = chip.size.height / 2;
-    if (@available(iOS 13.0, *)) bgv.layer.cornerCurve = kCACornerCurveContinuous;
-    bgv.clipsToBounds = YES;
-    l.frame = CGRectMake(12, 6, chip.size.width - 24, ls.height);
-    if ([bgv isKindOfClass:[UIVisualEffectView class]]) [((UIVisualEffectView *)bgv).contentView addSubview:l];
-    else [bgv addSubview:l];
-    v.frame = CGRectMake(0, 0, tv.bounds.size.width, chip.size.height + 20);
-    [v addSubview:bgv];
-    v.accessibilityTraits = UIAccessibilityTraitHeader;
-    return v;
+    self.backgroundColor = UIColor.clearColor;
+    self.contentView.backgroundColor = UIColor.clearColor;
+    self.selectionStyle = UITableViewCellSelectionStyleNone;
+
+    _cardContainer = [UIView new];
+    _cardContainer.backgroundColor = ZXColorCardBg();
+    _cardContainer.layer.cornerRadius = 14.0;
+    if (@available(iOS 13.0, *)) _cardContainer.layer.cornerCurve = kCACornerCurveContinuous;
+    _cardContainer.layer.borderWidth = 1.0;
+    _cardContainer.layer.borderColor = ZXColorCardBorder().CGColor;
+    _cardContainer.clipsToBounds = YES;
+    _cardContainer.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.contentView addSubview:_cardContainer];
+
+    _iconBadge = [UIView new];
+    _iconBadge.layer.cornerRadius = 10.0;
+    _iconBadge.translatesAutoresizingMaskIntoConstraints = NO;
+    [_cardContainer addSubview:_iconBadge];
+
+    _iconView = [UIImageView new];
+    _iconView.contentMode = UIViewContentModeScaleAspectFit;
+    _iconView.translatesAutoresizingMaskIntoConstraints = NO;
+    [_iconBadge addSubview:_iconView];
+
+    _titleLabel = [UILabel new];
+    _titleLabel.font = [UIFont systemFontOfSize:15.5 weight:UIFontWeightBold];
+    _titleLabel.textColor = UIColor.whiteColor;
+    _titleLabel.numberOfLines = 0;
+    _titleLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    [_cardContainer addSubview:_titleLabel];
+
+    _subtitleLabel = [UILabel new];
+    _subtitleLabel.font = [UIFont systemFontOfSize:12.5 weight:UIFontWeightRegular];
+    _subtitleLabel.textColor = ZXColorTextSub();
+    _subtitleLabel.numberOfLines = 0;
+    _subtitleLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    [_cardContainer addSubview:_subtitleLabel];
+
+    _toggleSwitch = [UISwitch new];
+    _toggleSwitch.onTintColor = ZXColorZaloRed();
+    _toggleSwitch.translatesAutoresizingMaskIntoConstraints = NO;
+    [_cardContainer addSubview:_toggleSwitch];
+
+    _chevronView = [UIImageView new];
+    if (@available(iOS 13.0, *)) {
+        UIImageSymbolConfiguration *cfg = [UIImageSymbolConfiguration configurationWithPointSize:13 weight:UIImageSymbolWeightBold];
+        _chevronView.image = [[UIImage systemImageNamed:@"chevron.right" withConfiguration:cfg] imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
+    }
+    _chevronView.tintColor = ZXColorTextSub();
+    _chevronView.contentMode = UIViewContentModeScaleAspectFit;
+    _chevronView.translatesAutoresizingMaskIntoConstraints = NO;
+    [_cardContainer addSubview:_chevronView];
+
+    _valueBadgeLabel = [UILabel new];
+    _valueBadgeLabel.font = [UIFont systemFontOfSize:12.5 weight:UIFontWeightBold];
+    _valueBadgeLabel.textColor = ZXColorZaloRed();
+    _valueBadgeLabel.textAlignment = NSTextAlignmentRight;
+    _valueBadgeLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    [_cardContainer addSubview:_valueBadgeLabel];
+
+    _sizeSlider = [UISlider new];
+    _sizeSlider.minimumValue = 38.0f;
+    _sizeSlider.maximumValue = 88.0f;
+    _sizeSlider.minimumTrackTintColor = ZXColorZaloRed();
+    _sizeSlider.maximumTrackTintColor = ZXColorCardBorder();
+    _sizeSlider.translatesAutoresizingMaskIntoConstraints = NO;
+    [_cardContainer addSubview:_sizeSlider];
+
+    [NSLayoutConstraint activateConstraints:@[
+        [_cardContainer.topAnchor constraintEqualToAnchor:self.contentView.topAnchor constant:4],
+        [_cardContainer.bottomAnchor constraintEqualToAnchor:self.contentView.bottomAnchor constant:-4],
+        [_cardContainer.leadingAnchor constraintEqualToAnchor:self.contentView.leadingAnchor constant:16],
+        [_cardContainer.trailingAnchor constraintEqualToAnchor:self.contentView.trailingAnchor constant:-16],
+
+        [_iconBadge.leadingAnchor constraintEqualToAnchor:_cardContainer.leadingAnchor constant:12],
+        [_iconBadge.topAnchor constraintEqualToAnchor:_cardContainer.topAnchor constant:12],
+        [_iconBadge.widthAnchor constraintEqualToConstant:36],
+        [_iconBadge.heightAnchor constraintEqualToConstant:36],
+
+        [_iconView.centerXAnchor constraintEqualToAnchor:_iconBadge.centerXAnchor],
+        [_iconView.centerYAnchor constraintEqualToAnchor:_iconBadge.centerYAnchor],
+        [_iconView.widthAnchor constraintEqualToConstant:20],
+        [_iconView.heightAnchor constraintEqualToConstant:20],
+
+        [_toggleSwitch.trailingAnchor constraintEqualToAnchor:_cardContainer.trailingAnchor constant:-12],
+        [_toggleSwitch.centerYAnchor constraintEqualToAnchor:_cardContainer.centerYAnchor],
+
+        [_chevronView.trailingAnchor constraintEqualToAnchor:_cardContainer.trailingAnchor constant:-14],
+        [_chevronView.centerYAnchor constraintEqualToAnchor:_cardContainer.centerYAnchor],
+        [_chevronView.widthAnchor constraintEqualToConstant:12],
+        [_chevronView.heightAnchor constraintEqualToConstant:16],
+
+        [_valueBadgeLabel.trailingAnchor constraintEqualToAnchor:_cardContainer.trailingAnchor constant:-14],
+        [_valueBadgeLabel.topAnchor constraintEqualToAnchor:_cardContainer.topAnchor constant:13],
+        [_valueBadgeLabel.widthAnchor constraintEqualToConstant:52],
+
+        [_titleLabel.topAnchor constraintEqualToAnchor:_cardContainer.topAnchor constant:12],
+        [_titleLabel.leadingAnchor constraintEqualToAnchor:_iconBadge.trailingAnchor constant:12],
+        [_titleLabel.trailingAnchor constraintEqualToAnchor:_cardContainer.trailingAnchor constant:-72],
+
+        [_subtitleLabel.topAnchor constraintEqualToAnchor:_titleLabel.bottomAnchor constant:3],
+        [_subtitleLabel.leadingAnchor constraintEqualToAnchor:_titleLabel.leadingAnchor],
+        [_subtitleLabel.trailingAnchor constraintEqualToAnchor:_titleLabel.trailingAnchor],
+
+        [_sizeSlider.topAnchor constraintEqualToAnchor:_subtitleLabel.bottomAnchor constant:8],
+        [_sizeSlider.leadingAnchor constraintEqualToAnchor:_titleLabel.leadingAnchor],
+        [_sizeSlider.trailingAnchor constraintEqualToAnchor:_cardContainer.trailingAnchor constant:-14],
+        [_sizeSlider.bottomAnchor constraintEqualToAnchor:_cardContainer.bottomAnchor constant:-10],
+    ]];
+
+    NSLayoutConstraint *subBottom = [_subtitleLabel.bottomAnchor constraintLessThanOrEqualToAnchor:_cardContainer.bottomAnchor constant:-12];
+    subBottom.priority = UILayoutPriorityDefaultHigh;
+    subBottom.active = YES;
+
+    NSLayoutConstraint *minCardHeight = [_cardContainer.heightAnchor constraintGreaterThanOrEqualToConstant:62];
+    minCardHeight.priority = UILayoutPriorityDefaultHigh;
+    minCardHeight.active = YES;
+
+    return self;
 }
-- (CGFloat)tableView:(UITableView *)tv heightForHeaderInSection:(NSInteger)s
+
+- (void)setHighlighted:(BOOL)highlighted animated:(BOOL)animated
 {
-    if (!self.showHeaders) return 8;
-    UILabel *l = [UILabel new];
-    l.text = [self.sections[s][@"title"] uppercaseString];
-    l.font = [UIFontMetrics.defaultMetrics scaledFontForFont:[UIFont systemFontOfSize:12 weight:UIFontWeightHeavy]];
-    l.numberOfLines = 0;
-    CGSize ls = [l sizeThatFits:CGSizeMake(tv.bounds.size.width - 64, CGFLOAT_MAX)];
-    return ls.height + 12 + 20;
+    [super setHighlighted:highlighted animated:animated];
+    _cardContainer.backgroundColor = highlighted
+        ? [UIColor colorWithRed:0.13 green:0.15 blue:0.19 alpha:1.0]
+        : ZXColorCardBg();
 }
-- (UIView *)tableView:(UITableView *)tv viewForFooterInSection:(NSInteger)s
+
+@end
+
+// ---------------------------------------------------------------- Main Modern Grouped List Controller
+
+static NSString *ZXFoldText(NSString *t)
 {
-    if (!self.showFooter || s != (NSInteger)self.sections.count - 1) return nil;
-    UILabel *l = [[UILabel alloc] initWithFrame:CGRectMake(20, 8, tv.bounds.size.width - 40, 60)];
-    l.numberOfLines = 0;
-    l.textAlignment = NSTextAlignmentCenter;
-    l.text = @"NTHE\nDựa trên ZaloXposed của ElectroHeavenVN (AGPL-3.0)";
-    l.font = [UIFont systemFontOfSize:12 weight:UIFontWeightMedium];
-    l.textColor = [UIColor colorWithWhite:1 alpha:0.85];
-    UIView *v = [[UIView alloc] initWithFrame:CGRectMake(0, 0, tv.bounds.size.width, 80)];
+    NSString *f = [t ?: @"" stringByFoldingWithOptions:NSDiacriticInsensitiveSearch | NSCaseInsensitiveSearch locale:nil];
+    f = [f stringByReplacingOccurrencesOfString:@"đ" withString:@"d"];
+    f = [f stringByReplacingOccurrencesOfString:@"Đ" withString:@"d"];
+    return f.lowercaseString;
+}
+
+@interface ZXMainViewController : UIViewController <UITableViewDataSource, UITableViewDelegate, UITextFieldDelegate, UIImagePickerControllerDelegate, UINavigationControllerDelegate>
+@property (nonatomic, strong) NSArray<NSDictionary *> *allSections;
+@property (nonatomic, strong) NSArray<NSDictionary *> *filteredSections;
+@property (nonatomic, strong) UITableView *tableView;
+@property (nonatomic, strong) UITextField *searchField;
+@end
+
+@implementation ZXMainViewController
+
+- (void)viewDidLoad
+{
+    [super viewDidLoad];
+    if (@available(iOS 13.0, *)) self.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
+    self.title = @"thanhthe";
+    self.view.backgroundColor = ZXColorBgPrimary();
+    self.allSections = ZXAllSections();
+    self.filteredSections = self.allSections;
+
+    self.navigationItem.leftBarButtonItem = ZXMakeNavButton(@"xmark.circle.fill", @"Đóng", ZXColorNavTint(), self, @selector(closeMenu));
+    self.navigationItem.rightBarButtonItem = ZXMakeNavButton(@"arrow.clockwise.circle.fill", @"Khởi động lại", ZXColorNavTint(), self, @selector(restartZalo));
+
+    UIView *searchHeader = [[UIView alloc] initWithFrame:CGRectMake(0, 0, self.view.bounds.size.width, 60)];
+    searchHeader.backgroundColor = ZXColorBgPrimary();
+
+    UIView *searchBox = [[UIView alloc] initWithFrame:CGRectMake(16, 10, self.view.bounds.size.width - 32, 42)];
+    searchBox.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+    searchBox.backgroundColor = ZXColorCardBg();
+    searchBox.layer.cornerRadius = 12.0;
+    searchBox.layer.borderWidth = 1.0;
+    searchBox.layer.borderColor = ZXColorCardBorder().CGColor;
+
+    UIImageView *searchIcon = [[UIImageView alloc] initWithFrame:CGRectMake(12, 12, 18, 18)];
+    if (@available(iOS 13.0, *)) {
+        UIImageSymbolConfiguration *cfg = [UIImageSymbolConfiguration configurationWithPointSize:14 weight:UIImageSymbolWeightSemibold];
+        searchIcon.image = [[UIImage systemImageNamed:@"magnifyingglass" withConfiguration:cfg] imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
+    }
+    searchIcon.tintColor = ZXColorTextSub();
+    [searchBox addSubview:searchIcon];
+
+    self.searchField = [[UITextField alloc] initWithFrame:CGRectMake(36, 0, searchBox.bounds.size.width - 44, 42)];
+    self.searchField.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+    self.searchField.textColor = UIColor.whiteColor;
+    self.searchField.tintColor = ZXColorZaloRed();
+    self.searchField.font = [UIFont systemFontOfSize:14.5 weight:UIFontWeightMedium];
+    self.searchField.clearButtonMode = UITextFieldViewModeWhileEditing;
+    self.searchField.returnKeyType = UIReturnKeyDone;
+    self.searchField.delegate = self;
+    self.searchField.attributedPlaceholder = [[NSAttributedString alloc] initWithString:@"Tìm nhanh tính năng, công tắc..."
+        attributes:@{ NSForegroundColorAttributeName: ZXColorTextSub() }];
+    [self.searchField addTarget:self action:@selector(searchChanged:) forControlEvents:UIControlEventEditingChanged];
+    [searchBox addSubview:self.searchField];
+    [searchHeader addSubview:searchBox];
+
+    self.tableView = [[UITableView alloc] initWithFrame:self.view.bounds style:UITableViewStyleGrouped];
+    if (@available(iOS 13.0, *)) self.tableView.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
+    self.tableView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    self.tableView.backgroundColor = ZXColorBgPrimary();
+    self.tableView.separatorStyle = UITableViewCellSeparatorStyleNone;
+    self.tableView.dataSource = self;
+    self.tableView.delegate = self;
+    self.tableView.rowHeight = UITableViewAutomaticDimension;
+    self.tableView.estimatedRowHeight = 76;
+    self.tableView.keyboardDismissMode = UIScrollViewKeyboardDismissModeOnDrag;
+    self.tableView.tableHeaderView = searchHeader;
+    [self.tableView registerClass:[ZXModernRowCell class] forCellReuseIdentifier:@"ZXModernRowCell"];
+    [self.view addSubview:self.tableView];
+}
+
+- (void)viewWillAppear:(BOOL)animated
+{
+    [super viewWillAppear:animated];
+    ZXStyleNavBar(self.navigationController.navigationBar);
+    [self.tableView reloadData];
+}
+
+- (void)closeMenu
+{
+    [self dismissViewControllerAnimated:YES completion:^{
+        [ZXBubble show];
+        ZXRefreshFloatingBubbleNow();
+    }];
+}
+
+- (void)restartZalo
+{
+    UIAlertController *a = [UIAlertController alertControllerWithTitle:@"Khởi động lại Zalo?"
+                                                               message:@"Zalo sẽ đóng ngay để áp dụng toàn bộ cấu hình và rules mới."
+                                                        preferredStyle:UIAlertControllerStyleAlert];
+    if (@available(iOS 13.0, *)) a.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
+    [a addAction:[UIAlertAction actionWithTitle:@"Hủy" style:UIAlertActionStyleCancel handler:nil]];
+    [a addAction:[UIAlertAction actionWithTitle:@"Khởi động lại" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *act) {
+        (void)act;
+        exit(0);
+    }]];
+    [self presentViewController:a animated:YES completion:nil];
+}
+
+- (BOOL)textFieldShouldReturn:(UITextField *)textField
+{
+    [textField resignFirstResponder];
+    return YES;
+}
+
+- (void)searchChanged:(UITextField *)tf
+{
+    NSString *raw = [(tf.text ?: @"") stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    if (raw.length == 0) {
+        self.filteredSections = self.allSections;
+        [self.tableView reloadData];
+        return;
+    }
+    NSArray<NSString *> *tokens = [[ZXFoldText(raw) componentsSeparatedByString:@" "]
+        filteredArrayUsingPredicate:[NSPredicate predicateWithFormat:@"length > 0"]];
+    NSMutableArray *out = [NSMutableArray new];
+    for (NSDictionary *sec in self.allSections) {
+        NSMutableArray *hits = [NSMutableArray new];
+        for (NSDictionary *it in sec[@"items"]) {
+            NSString *hay = ZXFoldText([NSString stringWithFormat:@"%@ %@ %@ %@",
+                                        it[@"title"] ?: @"", it[@"sub"] ?: @"", it[@"kw"] ?: @"", sec[@"title"] ?: @""]);
+            BOOL ok = YES;
+            for (NSString *tok in tokens) {
+                if ([hay rangeOfString:tok].location == NSNotFound) { ok = NO; break; }
+            }
+            if (ok) [hits addObject:it];
+        }
+        if (hits.count) {
+            NSMutableDictionary *copy = [sec mutableCopy];
+            copy[@"items"] = hits;
+            [out addObject:copy];
+        }
+    }
+    self.filteredSections = out;
+    [self.tableView reloadData];
+}
+
+// ---------------------------------------------------------------- TableView DataSource & Delegate
+
+- (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView
+{
+    (void)tableView;
+    return self.filteredSections.count;
+}
+
+- (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section
+{
+    (void)tableView;
+    return [self.filteredSections[section][@"items"] count];
+}
+
+- (UIView *)tableView:(UITableView *)tableView viewForHeaderInSection:(NSInteger)section
+{
+    UIView *v = [[UIView alloc] initWithFrame:CGRectMake(0, 0, tableView.bounds.size.width, 36)];
+    v.backgroundColor = UIColor.clearColor;
+    UILabel *l = [[UILabel alloc] initWithFrame:CGRectMake(22, 10, tableView.bounds.size.width - 44, 20)];
+    l.text = self.filteredSections[section][@"title"];
+    l.font = [UIFont systemFontOfSize:12 weight:UIFontWeightHeavy];
+    l.textColor = ZXColorTextSub();
     [v addSubview:l];
     return v;
 }
-- (CGFloat)tableView:(UITableView *)tv heightForFooterInSection:(NSInteger)s
+
+- (CGFloat)tableView:(UITableView *)tableView heightForHeaderInSection:(NSInteger)section
 {
-    if (self.showFooter && s == (NSInteger)self.sections.count - 1) return 84;
-    return 6;
-}
-- (void)tableView:(UITableView *)tv willDisplayCell:(UITableViewCell *)cell forRowAtIndexPath:(NSIndexPath *)ip
-{
-    if ([cell isKindOfClass:[ZXCardCell class]]) [(ZXCardCell *)cell applyCardStyle];
-    if ([self.shownRows containsObject:ip]) return;
-    [self.shownRows addObject:ip];
-    if (ZXReduceMotion()) return;
-    cell.alpha = 0;
-    cell.transform = CGAffineTransformConcat(CGAffineTransformMakeTranslation(0, 26), CGAffineTransformMakeScale(0.95, 0.95));
-    NSTimeInterval delay = MIN(ip.row, 8) * 0.035;
-    [UIView animateWithDuration:0.5 delay:delay usingSpringWithDamping:0.78 initialSpringVelocity:0.4
-                        options:UIViewAnimationOptionAllowUserInteraction animations:^{
-        cell.alpha = 1;
-        cell.transform = CGAffineTransformIdentity;
-    } completion:nil];
+    (void)tableView; (void)section;
+    return 36.0;
 }
 
-- (UITableViewCell *)tableView:(UITableView *)tv cellForRowAtIndexPath:(NSIndexPath *)ip
+- (UIView *)tableView:(UITableView *)tableView viewForFooterInSection:(NSInteger)section
 {
-    NSDictionary *item = self.sections[ip.section][@"items"][ip.row];
-    UITableViewCell *cell = [[ZXCardCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:nil];
-    cell.textLabel.text = item[@"title"];
-    cell.textLabel.numberOfLines = 0;
-    cell.detailTextLabel.numberOfLines = 0;
+    if (section != (NSInteger)self.filteredSections.count - 1) return nil;
+    UIView *v = [[UIView alloc] initWithFrame:CGRectMake(0, 0, tableView.bounds.size.width, 64)];
+    UILabel *l = [[UILabel alloc] initWithFrame:CGRectMake(20, 10, tableView.bounds.size.width - 40, 44)];
+    l.numberOfLines = 0;
+    l.textAlignment = NSTextAlignmentCenter;
+    l.text = @"thanhthe • Giao diện tối giản độ tương phản cao\nDựa trên ZaloXposed của ElectroHeavenVN (AGPL-3.0)";
+    l.font = [UIFont systemFontOfSize:11.5 weight:UIFontWeightMedium];
+    l.textColor = ZXColorTextSub();
+    [v addSubview:l];
+    return v;
+}
+
+- (CGFloat)tableView:(UITableView *)tableView heightForFooterInSection:(NSInteger)section
+{
+    (void)tableView;
+    return (section == (NSInteger)self.filteredSections.count - 1) ? 68.0 : 6.0;
+}
+
+- (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath
+{
+    ZXModernRowCell *cell = [tableView dequeueReusableCellWithIdentifier:@"ZXModernRowCell" forIndexPath:indexPath];
+    NSDictionary *item = self.filteredSections[indexPath.section][@"items"][indexPath.row];
+
+    cell.titleLabel.text = item[@"title"];
     NSString *action = item[@"action"];
-    if (item[@"key"]) {
-        cell.detailTextLabel.text = item[@"sub"];
-        ZXToggle *sw = [ZXToggle new];
-        sw.on = [ZXConfig boolForKey:item[@"key"]];
-        sw.tag = ip.section * 100 + ip.row;
-        sw.accessibilityLabel = item[@"title"];
-        [sw addTarget:self action:@selector(switchChanged:) forControlEvents:UIControlEventValueChanged];
-        cell.accessoryView = sw;
-        cell.selectionStyle = UITableViewCellSelectionStyleNone;
+    NSString *type = item[@"type"];
+    NSString *key = item[@"key"];
+
+    if ([action isEqualToString:@"uid"]) {
+        NSString *uid = [ZXConfig currentUserID];
+        cell.subtitleLabel.text = uid.length ? [NSString stringWithFormat:@"ID hiện tại: %@", uid] : item[@"sub"];
+    } else if ([action isEqualToString:@"ttl"]) {
+        cell.subtitleLabel.text = [NSString stringWithFormat:@"Hiện tại: %lld ms — %@", [ZXConfig ttl], item[@"sub"]];
+    } else if ([action isEqualToString:@"tabbaridle"]) {
+        cell.subtitleLabel.text = [NSString stringWithFormat:@"Hiện tại: %.0f giây — %@", [ZXConfig tabBarIdleSeconds], item[@"sub"]];
+    } else if ([action isEqualToString:@"picklogo"]) {
+        BOOL isCustom = [ZXConfig customLogoMode] && [[NSFileManager defaultManager] fileExistsAtPath:[ZXConfig customLogoPath]];
+        cell.subtitleLabel.text = isCustom ? @"Đang dùng: Ảnh tùy chỉnh (Documents/nthe_custom_logo.png)" : item[@"sub"];
+    } else if ([action isEqualToString:@"resetlogo"]) {
+        BOOL isCustom = [ZXConfig customLogoMode] && [[NSFileManager defaultManager] fileExistsAtPath:[ZXConfig customLogoPath]];
+        cell.subtitleLabel.text = isCustom ? @"Nhấn để quay về Logo Zalo Đỏ mặc định" : @"Đang sử dụng Logo Zalo Đỏ mặc định";
+    } else if ([action isEqualToString:@"set_lock_pin"]) {
+        BOOL hasPin = [ZXConfig chatLockPIN].length > 0;
+        cell.subtitleLabel.text = hasPin ? @"Đã thiết lập mã PIN 4 số • Nhấn để đổi mã PIN" : item[@"sub"];
+    } else if ([action isEqualToString:@"locked_chats_list"]) {
+        cell.subtitleLabel.text = [NSString stringWithFormat:@"Đang khóa: %lu hội thoại — %@", (unsigned long)[ZXConfig lockedChats].count, item[@"sub"]];
+    } else if ([action isEqualToString:@"hidden_chats_list"]) {
+        cell.subtitleLabel.text = [NSString stringWithFormat:@"Đã phát hiện: %lu hội thoại ẩn — %@", (unsigned long)[ZXHookEngine discoveredHiddenChats].count, item[@"sub"]];
+    } else if ([action isEqualToString:@"voice_speed_menu"]) {
+        cell.subtitleLabel.text = [NSString stringWithFormat:@"Tốc độ hiện tại: %.1fx — %@", [ZXConfig voicePlaybackRate], item[@"sub"]];
     } else {
-        if ([action isEqualToString:@"uid"])
-            cell.detailTextLabel.text = [ZXConfig currentUserID].length ? [ZXConfig currentUserID] : item[@"sub"];
-        else if ([action isEqualToString:@"ttl"])
-            cell.detailTextLabel.text = [NSString stringWithFormat:@"%lld", [ZXConfig ttl]];
-        else
-            cell.detailTextLabel.text = item[@"sub"];
-        cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
-        cell.tintColor = ZXAccent();
+        cell.subtitleLabel.text = item[@"sub"];
     }
+
+    NSUInteger hex = [item[@"color"] unsignedIntegerValue] ?: 0xE53935;
+    if ([action isEqualToString:@"picklogo"] || [action isEqualToString:@"resetlogo"]) {
+        cell.iconBadge.backgroundColor = UIColor.clearColor;
+        cell.iconView.tintColor = nil;
+        cell.iconView.image = [action isEqualToString:@"resetlogo"]
+            ? ZXDrawRedZaloLogo(CGSizeMake(36, 36))
+            : ZXCurrentFloatingLogo(CGSizeMake(36, 36));
+        cell.iconView.layer.cornerRadius = 10.0;
+        cell.iconView.clipsToBounds = YES;
+    } else {
+        cell.iconView.layer.cornerRadius = 0;
+        cell.iconView.clipsToBounds = NO;
+        cell.iconBadge.backgroundColor = ZXColorFromHex(hex, 0.18);
+        UIColor *icColor = ZXColorFromHex(hex, 1.0);
+        UIImage *img = nil;
+        if (@available(iOS 13.0, *)) {
+            UIImageSymbolConfiguration *cfg = [UIImageSymbolConfiguration configurationWithPointSize:16 weight:UIImageSymbolWeightSemibold];
+            NSString *sym = item[@"icon"] ?: @"circle.fill";
+            img = [UIImage systemImageNamed:sym withConfiguration:cfg] ?: [UIImage systemImageNamed:@"gearshape.fill" withConfiguration:cfg];
+            img = [img imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
+        }
+        cell.iconView.image = img;
+        cell.iconView.tintColor = icColor;
+    }
+
+    [cell.toggleSwitch removeTarget:nil action:NULL forControlEvents:UIControlEventAllEvents];
+    [cell.sizeSlider removeTarget:nil action:NULL forControlEvents:UIControlEventAllEvents];
+
+    if ([type isEqualToString:@"slider"]) {
+        cell.toggleSwitch.hidden = YES;
+        cell.chevronView.hidden = YES;
+        cell.sizeSlider.hidden = NO;
+        cell.valueBadgeLabel.hidden = NO;
+        double sz = [ZXConfig bubbleSize];
+        cell.sizeSlider.value = (float)sz;
+        cell.valueBadgeLabel.text = [NSString stringWithFormat:@"%.0f pt", sz];
+        [cell.sizeSlider addTarget:self action:@selector(bubbleSliderChanged:) forControlEvents:UIControlEventValueChanged];
+    } else if (key.length > 0) {
+        cell.toggleSwitch.hidden = NO;
+        cell.chevronView.hidden = YES;
+        cell.sizeSlider.hidden = YES;
+        cell.valueBadgeLabel.hidden = YES;
+        cell.toggleSwitch.on = [ZXConfig boolForKey:key];
+        cell.toggleSwitch.tag = indexPath.section * 1000 + indexPath.row;
+        [cell.toggleSwitch addTarget:self action:@selector(switchToggled:) forControlEvents:UIControlEventValueChanged];
+    } else {
+        cell.toggleSwitch.hidden = YES;
+        cell.chevronView.hidden = NO;
+        cell.sizeSlider.hidden = YES;
+        cell.valueBadgeLabel.hidden = YES;
+    }
+
     return cell;
 }
 
-- (void)switchChanged:(ZXToggle *)sw
+- (void)switchToggled:(UISwitch *)sw
 {
-    NSDictionary *item = self.sections[sw.tag / 100][@"items"][sw.tag % 100];
-    [ZXConfig setBool:sw.on forKey:item[@"key"]];
-    if ([item[@"key"] isEqualToString:ZXK_LIQUID_GLASS]) {
-        [self.shownRows removeAllObjects];
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            [UIView transitionWithView:self.tableView duration:0.45 options:UIViewAnimationOptionTransitionCrossDissolve
-                            animations:^{ [self.tableView reloadData]; } completion:nil];
-        });
-    } else if ([item[@"key"] isEqualToString:ZXK_FLOATING_TABBAR]) {
+    NSInteger sec = sw.tag / 1000;
+    NSInteger row = sw.tag % 1000;
+    if (sec < 0 || sec >= (NSInteger)self.filteredSections.count) return;
+    NSArray *items = self.filteredSections[sec][@"items"];
+    if (row < 0 || row >= (NSInteger)items.count) return;
+    NSDictionary *item = items[row];
+    NSString *key = item[@"key"];
+    if (!key) return;
+
+    [ZXConfig setBool:sw.on forKey:key];
+    if ([key isEqualToString:ZXK_FLOATING_TABBAR]) {
         ZXHookFloatingTabBar();
     }
 }
 
-- (void)alert:(NSString *)title message:(NSString *)msg
+- (void)bubbleSliderChanged:(UISlider *)slider
+{
+    double val = round(slider.value);
+    [ZXConfig setBubbleSize:val];
+    UIView *v = slider;
+    while (v && ![v isKindOfClass:[ZXModernRowCell class]]) v = v.superview;
+    if ([v isKindOfClass:[ZXModernRowCell class]]) {
+        ((ZXModernRowCell *)v).valueBadgeLabel.text = [NSString stringWithFormat:@"%.0f pt", val];
+    }
+    [ZXBubble show];
+    ZXRefreshFloatingBubbleNow();
+}
+
+// ---------------------------------------------------------------- Custom Floating Logo Picker
+
+- (void)pickCustomLogo
+{
+    UIImagePickerController *picker = [UIImagePickerController new];
+    if (@available(iOS 13.0, *)) picker.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
+    picker.sourceType = UIImagePickerControllerSourceTypePhotoLibrary;
+    picker.allowsEditing = YES;
+    picker.delegate = self;
+    [self presentViewController:picker animated:YES completion:nil];
+}
+
+- (void)imagePickerController:(UIImagePickerController *)picker didFinishPickingMediaWithInfo:(NSDictionary<UIImagePickerControllerInfoKey,id> *)info
+{
+    UIImage *chosen = info[UIImagePickerControllerEditedImage] ?: info[UIImagePickerControllerOriginalImage];
+    if (chosen) {
+        UIImage *circular = ZXCropCircularImage(chosen, 256.0);
+        NSData *png = UIImagePNGRepresentation(circular ?: chosen);
+        if (png) {
+            [png writeToFile:[ZXConfig customLogoPath] atomically:YES];
+            [ZXConfig setCustomLogoMode:YES];
+        }
+    }
+    [picker dismissViewControllerAnimated:YES completion:^{
+        [ZXBubble show];
+        ZXRefreshFloatingBubbleNow();
+        [self.tableView reloadData];
+    }];
+}
+
+- (void)imagePickerControllerDidCancel:(UIImagePickerController *)picker
+{
+    [picker dismissViewControllerAnimated:YES completion:nil];
+}
+
+- (void)resetDefaultRedLogo
+{
+    [[NSFileManager defaultManager] removeItemAtPath:[ZXConfig customLogoPath] error:nil];
+    [ZXConfig setCustomLogoMode:NO];
+    [ZXBubble show];
+    ZXRefreshFloatingBubbleNow();
+    [self.tableView reloadData];
+    [self showAlert:@"Đã khôi phục" message:@"Nút nổi đã chuyển về Logo Zalo Đỏ (#E53935) mặc định."];
+}
+
+// ---------------------------------------------------------------- Row Actions & Alerts
+
+- (void)showAlert:(NSString *)title message:(NSString *)msg
 {
     UIAlertController *a = [UIAlertController alertControllerWithTitle:title message:msg preferredStyle:UIAlertControllerStyleAlert];
+    if (@available(iOS 13.0, *)) a.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
     [a addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
     [self presentViewController:a animated:YES completion:nil];
 }
 
-- (void)prompt:(NSString *)title text:(NSString *)text numeric:(BOOL)numeric done:(void (^)(NSString *))done
+- (void)promptInput:(NSString *)title currentText:(NSString *)text numeric:(BOOL)numeric completion:(void (^)(NSString *))done
 {
     UIAlertController *a = [UIAlertController alertControllerWithTitle:title message:nil preferredStyle:UIAlertControllerStyleAlert];
+    if (@available(iOS 13.0, *)) a.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
     [a addTextFieldWithConfigurationHandler:^(UITextField *tf) {
         tf.text = text;
         tf.keyboardType = numeric ? UIKeyboardTypeNumberPad : UIKeyboardTypeDefault;
     }];
     [a addAction:[UIAlertAction actionWithTitle:@"Hủy" style:UIAlertActionStyleCancel handler:nil]];
     [a addAction:[UIAlertAction actionWithTitle:@"Lưu" style:UIAlertActionStyleDefault handler:^(UIAlertAction *x) {
+        (void)x;
         done(a.textFields.firstObject.text ?: @"");
     }]];
     [self presentViewController:a animated:YES completion:nil];
 }
 
-- (void)pushText:(NSString *)text editable:(BOOL)editable title:(NSString *)title save:(BOOL (^)(NSString *, NSString **))save
+- (void)pushTextViewer:(NSString *)text editable:(BOOL)editable title:(NSString *)title onSave:(BOOL (^)(NSString *, NSString **))save
 {
     ZXTextViewController *vc = [ZXTextViewController new];
     vc.title = title;
@@ -711,56 +1281,109 @@ static void ZXStyleNavBar(UINavigationBar *bar)
     [self.navigationController pushViewController:vc animated:YES];
 }
 
-- (void)tableView:(UITableView *)tv didSelectRowAtIndexPath:(NSIndexPath *)ip
+- (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath
 {
-    [tv deselectRowAtIndexPath:ip animated:YES];
-    NSDictionary *item = self.sections[ip.section][@"items"][ip.row];
+    [tableView deselectRowAtIndexPath:indexPath animated:YES];
+    NSDictionary *item = self.filteredSections[indexPath.section][@"items"][indexPath.row];
     NSString *action = item[@"action"];
     if (!action) return;
-    __weak typeof(self) weak = self;
 
-    if ([action isEqualToString:@"bgpick"]) { [self pickBackground]; return; }
-    if ([action isEqualToString:@"bgreset"]) {
-        [[NSFileManager defaultManager] removeItemAtPath:ZXBackgroundPath() error:nil];
-        [self buildBackground];
-        return;
-    }
-    if ([action isEqualToString:@"uid"]) {
-        [self prompt:@"User ID Zalo của bạn" text:[ZXConfig currentUserID] numeric:YES done:^(NSString *t) {
+    __weak typeof(self) weakSelf = self;
+    if ([action isEqualToString:@"picklogo"]) {
+        [self pickCustomLogo];
+    } else if ([action isEqualToString:@"resetlogo"]) {
+        [self resetDefaultRedLogo];
+    } else if ([action isEqualToString:@"hidden_chats_list"]) {
+        ZXAuthenticateUserFromVC(self, @"Xác thực Face ID / Mã PIN để xem danh sách trò chuyện đang ẩn", ^{
+            ZXHiddenChatsViewController *vc = [[ZXHiddenChatsViewController alloc] initWithStyle:UITableViewStyleGrouped];
+            [weakSelf.navigationController pushViewController:vc animated:YES];
+        });
+    } else if ([action isEqualToString:@"set_lock_pin"]) {
+        ZXAuthenticateUserFromVC(self, @"Xác thực trước khi đặt mã PIN khóa chat", ^{
+            [weakSelf promptInput:@"Nhập mã PIN dự phòng (4 chữ số)" currentText:[ZXConfig chatLockPIN] numeric:YES completion:^(NSString *t) {
+                NSString *clean = [t stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+                [ZXConfig setChatLockPIN:clean];
+                [weakSelf.tableView reloadData];
+            }];
+        });
+    } else if ([action isEqualToString:@"locked_chats_list"]) {
+        ZXAuthenticateUserFromVC(self, @"Xác thực để quản lý danh sách phòng chat bị khóa", ^{
+            ZXLockedChatsViewController *vc = [[ZXLockedChatsViewController alloc] initWithStyle:UITableViewStyleGrouped];
+            [weakSelf.navigationController pushViewController:vc animated:YES];
+        });
+    } else if ([action isEqualToString:@"open_repeater"]) {
+        [ZXHookEngine presentRepeaterDialogFromVC:self];
+    } else if ([action isEqualToString:@"call_records_list"]) {
+        ZXCallRecordsViewController *vc = [[ZXCallRecordsViewController alloc] initWithStyle:UITableViewStyleGrouped];
+        [self.navigationController pushViewController:vc animated:YES];
+    } else if ([action isEqualToString:@"voice_speed_menu"]) {
+        UIAlertController *sheet = [UIAlertController alertControllerWithTitle:@"Tốc độ & Lưu tin nhắn thoại"
+                                                                       message:@"Chọn tốc độ phát mặc định hoặc lưu tệp tin nhắn thoại gần nhất"
+                                                                preferredStyle:UIAlertControllerStyleActionSheet];
+        if (@available(iOS 13.0, *)) sheet.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
+        for (NSNumber *rNum in @[@1.0, @1.5, @2.0]) {
+            double r = rNum.doubleValue;
+            NSString *title = [NSString stringWithFormat:@"⏩ Tốc độ phát %.1fx%@", r, ([ZXConfig voicePlaybackRate] == r ? @" (Đang chọn)" : @"")];
+            [sheet addAction:[UIAlertAction actionWithTitle:title style:UIAlertActionStyleDefault handler:^(UIAlertAction *act) {
+                (void)act;
+                [ZXConfig setVoicePlaybackRate:r];
+                [ZXConfig setBool:YES forKey:ZXK_VOICE_MSG_TOOLS];
+                [weakSelf.tableView reloadData];
+            }]];
+        }
+        NSURL *lastURL = [ZXHookEngine lastVoiceMessageURL];
+        if (lastURL) {
+            [sheet addAction:[UIAlertAction actionWithTitle:@"💾 Lưu / Chia sẻ tệp tin nhắn thoại gần nhất" style:UIAlertActionStyleDefault handler:^(UIAlertAction *act) {
+                (void)act;
+                UIActivityViewController *av = [[UIActivityViewController alloc] initWithActivityItems:@[lastURL] applicationActivities:nil];
+                if (@available(iOS 13.0, *)) av.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
+                av.popoverPresentationController.sourceView = [tableView cellForRowAtIndexPath:indexPath];
+                [weakSelf presentViewController:av animated:YES completion:nil];
+            }]];
+        }
+        [sheet addAction:[UIAlertAction actionWithTitle:@"Đóng" style:UIAlertActionStyleCancel handler:nil]];
+        sheet.popoverPresentationController.sourceView = [tableView cellForRowAtIndexPath:indexPath];
+        [self presentViewController:sheet animated:YES completion:nil];
+    } else if ([action isEqualToString:@"uid"]) {
+        [self promptInput:@"User ID Zalo của bạn" currentText:[ZXConfig currentUserID] numeric:YES completion:^(NSString *t) {
             [ZXConfig setCurrentUserID:[t stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet]];
-            [weak.tableView reloadData];
+            [weakSelf.tableView reloadData];
         }];
     } else if ([action isEqualToString:@"ttl"]) {
-        [self prompt:@"TTL (ms)" text:[NSString stringWithFormat:@"%lld", [ZXConfig ttl]] numeric:YES done:^(NSString *t) {
+        [self promptInput:@"Giá trị TTL (ms)" currentText:[NSString stringWithFormat:@"%lld", [ZXConfig ttl]] numeric:YES completion:^(NSString *t) {
             [ZXConfig setTTL:t.longLongValue];
-            [weak.tableView reloadData];
+            [weakSelf.tableView reloadData];
         }];
     } else if ([action isEqualToString:@"tabbaridle"]) {
-        [self prompt:@"Tự thu gọn sau (giây), 0 = tắt"
-                text:[NSString stringWithFormat:@"%.0f", [ZXConfig tabBarIdleSeconds]]
-             numeric:YES done:^(NSString *t) {
+        [self promptInput:@"Tự thu gọn sau (giây), 0 = tắt"
+              currentText:[NSString stringWithFormat:@"%.0f", [ZXConfig tabBarIdleSeconds]]
+                  numeric:YES
+               completion:^(NSString *t) {
             [ZXConfig setTabBarIdleSeconds:MAX(0, t.doubleValue)];
-            [weak.tableView reloadData];
+            [weakSelf.tableView reloadData];
         }];
     } else if ([action isEqualToString:@"scan"]) {
         dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
             [ZXScanner runScan];
             dispatch_async(dispatch_get_main_queue(), ^{
-                [weak alert:@"Quét xong" message:@"Chọn 'Xem / chia sẻ kết quả quét' để xem danh sách."];
+                [weakSelf showAlert:@"Quét hoàn tất" message:@"Chọn 'Xem & Chia sẻ kết quả quét' để xem danh sách class/method."];
             });
         });
     } else if ([action isEqualToString:@"viewscan"]) {
         NSString *t = [NSString stringWithContentsOfFile:[ZXScanner scanPath] encoding:NSUTF8StringEncoding error:nil];
-        if (!t) { [self alert:@"Chưa có dữ liệu" message:@"Hãy chạy 'Quét class/method' trước."]; return; }
-        [self pushText:t editable:NO title:@"scan.txt" save:nil];
+        if (!t) {
+            [self showAlert:@"Chưa có dữ liệu" message:@"Hãy chạy 'Quét Class / Method Runtime' trước."];
+            return;
+        }
+        [self pushTextViewer:t editable:NO title:@"scan.txt" onSave:nil];
         ZXTextViewController *vc = (ZXTextViewController *)self.navigationController.topViewController;
         UIBarButtonItem *copyItem = vc.navigationItem.rightBarButtonItem;
-        UIBarButtonItem *shareItem = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemAction target:self action:@selector(shareScan:)];
+        UIBarButtonItem *shareItem = ZXMakeNavButton(@"square.and.arrow.up", @"Chia sẻ", ZXColorZaloRed(), self, @selector(shareScan:));
         vc.navigationItem.rightBarButtonItems = copyItem ? @[shareItem, copyItem] : @[shareItem];
     } else if ([action isEqualToString:@"rules"]) {
         [ZXHookEngine ensureRulesFile];
         NSString *t = [NSString stringWithContentsOfFile:[ZXHookEngine rulesPath] encoding:NSUTF8StringEncoding error:nil];
-        [self pushText:t editable:YES title:@"rules.json" save:^BOOL(NSString *text, NSString **error) {
+        [self pushTextViewer:t editable:YES title:@"rules.json" onSave:^BOOL(NSString *text, NSString **error) {
             NSMutableArray *lines = [NSMutableArray new];
             for (NSString *l in [text componentsSeparatedByString:@"\n"])
                 if (![[l stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet] hasPrefix:@"//"]) [lines addObject:l];
@@ -776,457 +1399,28 @@ static void ZXStyleNavBar(UINavigationBar *bar)
         }];
     } else if ([action isEqualToString:@"history"]) {
         NSString *t = [NSString stringWithContentsOfFile:[ZXAntiRecall historyPath] encoding:NSUTF8StringEncoding error:nil];
-        [self pushText:(t ?: @"(chưa có tin nhắn nào bị thu hồi/xóa)") editable:NO title:@"Lịch sử" save:nil];
+        [self pushTextViewer:(t ?: @"(Chưa có tin nhắn nào bị thu hồi/xóa)") editable:NO title:@"Lịch sử thu hồi" onSave:nil];
     } else if ([action isEqualToString:@"clearmarks"]) {
         [ZXRecallMarker clearMarks];
-        [self alert:@"Đã xóa" message:@"Đã xóa danh sách tin đánh dấu thu hồi."];
+        [self showAlert:@"Đã xóa" message:@"Đã xóa danh sách tin đánh dấu thu hồi."];
     } else if ([action isEqualToString:@"clearcache"]) {
         [ZXAntiRecall clearCache];
-        [self alert:@"Đã xóa" message:@"Bộ nhớ đệm tin nhắn đã được xóa."];
+        [self showAlert:@"Đã xóa" message:@"Bộ nhớ đệm tin nhắn đã được dọn sạch."];
     } else if ([action isEqualToString:@"log"]) {
         NSString *t = [NSString stringWithContentsOfFile:ZXLogPath() encoding:NSUTF8StringEncoding error:nil];
-        [self pushText:(t ?: @"(trống)") editable:NO title:@"log.txt" save:nil];
+        [self pushTextViewer:(t ?: @"(Trống)") editable:NO title:@"log.txt" onSave:nil];
     } else if ([action isEqualToString:@"exit"]) {
-        exit(0);
+        [self restartZalo];
     }
 }
 
-- (void)shareScan:(UIBarButtonItem *)sender
+- (void)shareScan:(UIButton *)sender
 {
     NSURL *url = [NSURL fileURLWithPath:[ZXScanner scanPath]];
     UIActivityViewController *v = [[UIActivityViewController alloc] initWithActivityItems:@[url] applicationActivities:nil];
-    v.popoverPresentationController.barButtonItem = sender;
+    if (@available(iOS 13.0, *)) v.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
+    v.popoverPresentationController.sourceView = sender;
     [self presentViewController:v animated:YES completion:nil];
-}
-
-@end
-
-// ---------------------------------------------------------------- home: category tiles + search
-
-/// UIGlassEffect on iOS 26+ (looked up at runtime so older SDKs still build); thin dark blur on older systems.
-static UIVisualEffect *ZXGlassEffect(void)
-{
-    Class gc = NSClassFromString(@"UIGlassEffect");
-    if (gc) {
-        id e = [[gc alloc] init];
-        @try { [e setValue:@YES forKey:@"interactive"]; } @catch (__unused id x) {}
-        @try { [e setValue:[UIColor colorWithRed:0.05 green:0.09 blue:0.16 alpha:0.72] forKey:@"tintColor"]; } @catch (__unused id x) {} // keeps white text high contrast
-        return e;
-    }
-    return [UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThickMaterialDark];
-}
-
-static BOOL ZXGlassOn(void) { return [ZXConfig boolForKey:ZXK_LIQUID_GLASS] && !ZXReduceTransparency(); }
-
-/// A noticeably more transparent glass than ZXGlassEffect() above — used only for the floating
-/// tab bar and its drag "droplet", which have no text to keep readable on top of them (just
-/// Zalo's own icons), unlike the settings panel glass. Lets the chat content behind really show
-/// through, closer to Apple's own Liquid Glass dock/tab bar.
-static UIVisualEffect *ZXTabBarGlassEffect(void)
-{
-    Class gc = NSClassFromString(@"UIGlassEffect");
-    if (gc) {
-        id e = [[gc alloc] init];
-        @try { [e setValue:@YES forKey:@"interactive"]; } @catch (__unused id x) {}
-        @try { [e setValue:[UIColor colorWithWhite:0 alpha:0.12] forKey:@"tintColor"]; } @catch (__unused id x) {}
-        return e;
-    }
-    return [UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemUltraThinMaterial];
-}
-
-/// Capsule bar button with a glass background (used for "Thu gọn" / "Xong" when Liquid Glass is on).
-static UIBarButtonItem *ZXGlassBarButton(NSString *title, BOOL bold, id target, SEL action)
-{
-    UIButton *b = [UIButton buttonWithType:UIButtonTypeCustom];
-    [b setTitle:title forState:UIControlStateNormal];
-    [b setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
-    b.titleLabel.font = [UIFontMetrics.defaultMetrics scaledFontForFont:[UIFont systemFontOfSize:16 weight:bold ? UIFontWeightSemibold : UIFontWeightRegular]];
-    b.titleLabel.adjustsFontForContentSizeCategory = YES;
-    CGSize ts = [title sizeWithAttributes:@{ NSFontAttributeName: b.titleLabel.font }];
-    b.frame = CGRectMake(0, 0, MAX(64, ceil(ts.width) + 32), 40);
-    UIVisualEffectView *ev = [[UIVisualEffectView alloc] initWithEffect:ZXGlassEffect()];
-    ev.frame = b.bounds;
-    ev.userInteractionEnabled = NO;
-    ev.layer.cornerRadius = 20;
-    ev.clipsToBounds = YES;
-    ev.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-    [b insertSubview:ev atIndex:0];
-    [b addTarget:target action:action forControlEvents:UIControlEventTouchUpInside];
-    b.accessibilityLabel = title;
-    return [[UIBarButtonItem alloc] initWithCustomView:b];
-}
-
-@interface ZXTileCell : UICollectionViewCell
-- (void)configureWithCategory:(NSDictionary *)cat;
-@end
-
-@implementation ZXTileCell {
-    UIView *_iconBG;
-    UIImageView *_icon;
-    UILabel *_title, *_sub, *_badge;
-    UIVisualEffectView *_glass;
-}
-- (instancetype)initWithFrame:(CGRect)frame
-{
-    self = [super initWithFrame:frame];
-    if (!self) return nil;
-    if (@available(iOS 13.0, *)) self.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
-    if (@available(iOS 14.0, *)) {
-        self.automaticallyUpdatesBackgroundConfiguration = NO;
-        self.backgroundConfiguration = [UIBackgroundConfiguration clearConfiguration];
-    }
-    self.backgroundColor = UIColor.clearColor;
-    self.contentView.backgroundColor = [UIColor colorWithRed:0.08 green:0.13 blue:0.22 alpha:0.94];
-    self.contentView.layer.cornerRadius = 22;
-    if (@available(iOS 13.0, *)) self.contentView.layer.cornerCurve = kCACornerCurveContinuous;
-    self.contentView.layer.masksToBounds = YES;
-
-    _iconBG = [UIView new];
-    _iconBG.backgroundColor = [UIColor colorWithRed:0.10 green:0.75 blue:0.55 alpha:0.28];
-    _iconBG.layer.cornerRadius = 22;
-    _icon = [UIImageView new];
-    _icon.tintColor = UIColor.whiteColor;
-    _icon.contentMode = UIViewContentModeScaleAspectFit;
-
-    _badge = [UILabel new];
-    _badge.font = [UIFontMetrics.defaultMetrics scaledFontForFont:[UIFont systemFontOfSize:13 weight:UIFontWeightSemibold]];
-    _badge.adjustsFontForContentSizeCategory = YES;
-    _badge.textColor = UIColor.whiteColor;
-    _badge.textAlignment = NSTextAlignmentCenter;
-    _badge.backgroundColor = [UIColor colorWithRed:0.10 green:0.75 blue:0.55 alpha:0.32];
-    _badge.layer.cornerRadius = 12;
-    _badge.layer.masksToBounds = YES;
-
-    _title = [UILabel new];
-    _title.font = [UIFontMetrics.defaultMetrics scaledFontForFont:[UIFont systemFontOfSize:17 weight:UIFontWeightSemibold]];
-    _title.adjustsFontForContentSizeCategory = YES;
-    _title.textColor = UIColor.whiteColor;
-    _title.backgroundColor = UIColor.clearColor;
-    _title.numberOfLines = 2;
-    _sub = [UILabel new];
-    _sub.font = [UIFontMetrics.defaultMetrics scaledFontForFont:[UIFont systemFontOfSize:13]];
-    _sub.adjustsFontForContentSizeCategory = YES;
-    _sub.textColor = [UIColor colorWithWhite:0.90 alpha:1.0];
-    _sub.backgroundColor = UIColor.clearColor;
-    _sub.numberOfLines = 2;
-
-    for (UIView *v in @[_iconBG, _icon, _badge, _title, _sub]) {
-        v.translatesAutoresizingMaskIntoConstraints = NO;
-    }
-    UIView *c = self.contentView;
-    [c addSubview:_iconBG]; [c addSubview:_icon]; [c addSubview:_badge]; [c addSubview:_title]; [c addSubview:_sub];
-    [NSLayoutConstraint activateConstraints:@[
-        [_iconBG.topAnchor constraintEqualToAnchor:c.topAnchor constant:16],
-        [_iconBG.leadingAnchor constraintEqualToAnchor:c.leadingAnchor constant:16],
-        [_iconBG.widthAnchor constraintEqualToConstant:44],
-        [_iconBG.heightAnchor constraintEqualToConstant:44],
-        [_icon.centerXAnchor constraintEqualToAnchor:_iconBG.centerXAnchor],
-        [_icon.centerYAnchor constraintEqualToAnchor:_iconBG.centerYAnchor],
-        [_icon.widthAnchor constraintEqualToConstant:24],
-        [_icon.heightAnchor constraintEqualToConstant:24],
-        [_badge.trailingAnchor constraintEqualToAnchor:c.trailingAnchor constant:-14],
-        [_badge.centerYAnchor constraintEqualToAnchor:_iconBG.centerYAnchor],
-        [_badge.heightAnchor constraintGreaterThanOrEqualToConstant:24],
-        [_badge.widthAnchor constraintGreaterThanOrEqualToConstant:40],
-        [_title.topAnchor constraintEqualToAnchor:_iconBG.bottomAnchor constant:12],
-        [_title.leadingAnchor constraintEqualToAnchor:c.leadingAnchor constant:16],
-        [_title.trailingAnchor constraintEqualToAnchor:c.trailingAnchor constant:-14],
-        [_sub.topAnchor constraintEqualToAnchor:_title.bottomAnchor constant:3],
-        [_sub.leadingAnchor constraintEqualToAnchor:_title.leadingAnchor],
-        [_sub.trailingAnchor constraintEqualToAnchor:_title.trailingAnchor],
-        [_sub.bottomAnchor constraintLessThanOrEqualToAnchor:c.bottomAnchor constant:-12],
-    ]];
-    self.isAccessibilityElement = YES;
-    self.accessibilityTraits = UIAccessibilityTraitButton;
-    return self;
-}
-- (void)applyStyleGlass:(BOOL)glass
-{
-    if (@available(iOS 14.0, *)) {
-        self.automaticallyUpdatesBackgroundConfiguration = NO;
-        self.backgroundConfiguration = [UIBackgroundConfiguration clearConfiguration];
-    }
-    self.backgroundColor = UIColor.clearColor;
-    if (glass) {
-        if (!_glass) {
-            _glass = [[UIVisualEffectView alloc] initWithEffect:ZXGlassEffect()];
-            _glass.frame = self.contentView.bounds;
-            _glass.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-            _glass.userInteractionEnabled = NO;
-            _glass.backgroundColor = [UIColor colorWithRed:0.06 green:0.10 blue:0.18 alpha:0.55];
-            _glass.contentView.backgroundColor = [UIColor colorWithRed:0.06 green:0.10 blue:0.18 alpha:0.45];
-            [self.contentView insertSubview:_glass atIndex:0];
-        }
-        _glass.hidden = NO;
-        self.contentView.backgroundColor = [UIColor colorWithRed:0.06 green:0.10 blue:0.18 alpha:0.68];
-    } else {
-        _glass.hidden = YES;
-        self.contentView.backgroundColor = [UIColor colorWithRed:0.08 green:0.13 blue:0.22 alpha:0.94];
-    }
-    _title.textColor = UIColor.whiteColor;
-    _sub.textColor = [UIColor colorWithWhite:0.90 alpha:1.0];
-    _icon.tintColor = UIColor.whiteColor;
-    _iconBG.backgroundColor = [UIColor colorWithRed:0.10 green:0.75 blue:0.55 alpha:0.28];
-    _badge.textColor = UIColor.whiteColor;
-    _badge.backgroundColor = [UIColor colorWithRed:0.10 green:0.75 blue:0.55 alpha:0.32];
-}
-- (void)configureWithCategory:(NSDictionary *)cat
-{
-    [self applyStyleGlass:ZXGlassOn()];
-    UIImage *img = nil;
-    if (@available(iOS 13.0, *)) {
-        UIImageSymbolConfiguration *cfg = [UIImageSymbolConfiguration configurationWithPointSize:20 weight:UIImageSymbolWeightSemibold];
-        img = [UIImage systemImageNamed:cat[@"icon"] withConfiguration:cfg] ?: [UIImage systemImageNamed:@"circle.grid.2x2" withConfiguration:cfg];
-    }
-    _icon.image = img;
-    _title.text = cat[@"title"];
-    _sub.text = cat[@"desc"];
-    NSInteger total = 0, on = 0;
-    for (NSDictionary *it in cat[@"items"])
-        if (it[@"key"]) { total++; if ([ZXConfig boolForKey:it[@"key"]]) on++; }
-    _badge.hidden = (total == 0);
-    _badge.text = total ? [NSString stringWithFormat:@"%ld/%ld", (long)on, (long)total] : nil;
-    self.accessibilityLabel = total
-        ? [NSString stringWithFormat:@"%@. %@. %ld trên %ld tính năng đang bật", cat[@"title"], cat[@"desc"], (long)on, (long)total]
-        : [NSString stringWithFormat:@"%@. %@", cat[@"title"], cat[@"desc"]];
-}
-- (void)setHighlighted:(BOOL)highlighted
-{
-    [super setHighlighted:highlighted];
-    if (ZXReduceMotion()) return;
-    [UIView animateWithDuration:0.18 delay:0 usingSpringWithDamping:0.7 initialSpringVelocity:0
-                        options:UIViewAnimationOptionAllowUserInteraction animations:^{
-        self.transform = highlighted ? CGAffineTransformMakeScale(0.96, 0.96) : CGAffineTransformIdentity;
-    } completion:nil];
-}
-@end
-
-static NSString *ZXFold(NSString *t)
-{
-    NSString *f = [t ?: @"" stringByFoldingWithOptions:NSDiacriticInsensitiveSearch | NSCaseInsensitiveSearch locale:nil];
-    f = [f stringByReplacingOccurrencesOfString:@"đ" withString:@"d"];
-    f = [f stringByReplacingOccurrencesOfString:@"Đ" withString:@"d"];
-    return f.lowercaseString;
-}
-
-@interface ZXHomeViewController : UIViewController <UICollectionViewDataSource, UICollectionViewDelegateFlowLayout, UISearchResultsUpdating>
-@property (nonatomic, strong) NSArray<NSDictionary *> *cats;
-@property (nonatomic, strong) UICollectionView *cv;
-@property (nonatomic, strong) UIView *backdrop;
-@property (nonatomic, strong) UISearchController *search;
-@property (nonatomic, strong) ZXSettingsViewController *results;
-@property (nonatomic, strong) UIView *emptyView;
-@property (nonatomic, strong) UILabel *emptyLabel;
-@property (nonatomic, strong) NSMutableSet<NSIndexPath *> *shown;
-@end
-
-@implementation ZXHomeViewController
-
-- (void)viewDidLoad
-{
-    [super viewDidLoad];
-    self.title = @"NTHE";
-    // Liquid Glass starts ON once; after that the user's choice in "Giao diện" is respected
-    if (![ZXConfig boolForKey:@"lg_default_applied"]) {
-        [ZXConfig setBool:YES forKey:ZXK_LIQUID_GLASS];
-        [ZXConfig setBool:YES forKey:@"lg_default_applied"];
-    }
-    self.cats = ZXCategories();
-    self.shown = [NSMutableSet new];
-    self.view.backgroundColor = [UIColor colorWithRed:0.08 green:0.16 blue:0.34 alpha:1];
-    if (@available(iOS 13.0, *)) self.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
-    [self refreshBackdrop];
-
-    UICollectionViewFlowLayout *layout = [UICollectionViewFlowLayout new];
-    layout.minimumLineSpacing = 12;
-    layout.minimumInteritemSpacing = 12;
-    layout.sectionInset = UIEdgeInsetsMake(8, 16, 28, 16);
-    self.cv = [[UICollectionView alloc] initWithFrame:self.view.bounds collectionViewLayout:layout];
-    self.cv.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-    self.cv.backgroundColor = UIColor.clearColor;
-    self.cv.dataSource = self;
-    self.cv.delegate = self;
-    self.cv.alwaysBounceVertical = YES;
-    self.cv.showsVerticalScrollIndicator = NO;
-    self.cv.keyboardDismissMode = UIScrollViewKeyboardDismissModeOnDrag;
-    [self.cv registerClass:[ZXTileCell class] forCellWithReuseIdentifier:@"tile"];
-    [self.view addSubview:self.cv];
-
-    // search results reuse the settings list, grouped by category
-    self.results = [[ZXSettingsViewController alloc] initWithSections:@[] title:nil];
-    self.results.showHeaders = YES;
-    [self addChildViewController:self.results];
-    self.results.view.frame = self.view.bounds;
-    self.results.view.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-    self.results.view.hidden = YES;
-    [self.view addSubview:self.results.view];
-    [self.results didMoveToParentViewController:self];
-
-    // empty state
-    self.emptyView = [UIView new];
-    self.emptyView.backgroundColor = [UIColor colorWithWhite:0 alpha:0.5];
-    self.emptyView.layer.cornerRadius = 16;
-    self.emptyView.hidden = YES;
-    self.emptyView.translatesAutoresizingMaskIntoConstraints = NO;
-    self.emptyLabel = [UILabel new];
-    self.emptyLabel.numberOfLines = 0;
-    self.emptyLabel.textAlignment = NSTextAlignmentCenter;
-    self.emptyLabel.textColor = UIColor.whiteColor;
-    self.emptyLabel.font = [UIFontMetrics.defaultMetrics scaledFontForFont:[UIFont systemFontOfSize:15 weight:UIFontWeightMedium]];
-    self.emptyLabel.adjustsFontForContentSizeCategory = YES;
-    self.emptyLabel.translatesAutoresizingMaskIntoConstraints = NO;
-    [self.emptyView addSubview:self.emptyLabel];
-    [self.view addSubview:self.emptyView];
-    [NSLayoutConstraint activateConstraints:@[
-        [self.emptyLabel.topAnchor constraintEqualToAnchor:self.emptyView.topAnchor constant:14],
-        [self.emptyLabel.bottomAnchor constraintEqualToAnchor:self.emptyView.bottomAnchor constant:-14],
-        [self.emptyLabel.leadingAnchor constraintEqualToAnchor:self.emptyView.leadingAnchor constant:18],
-        [self.emptyLabel.trailingAnchor constraintEqualToAnchor:self.emptyView.trailingAnchor constant:-18],
-        [self.emptyView.centerXAnchor constraintEqualToAnchor:self.view.centerXAnchor],
-        [self.emptyView.topAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.topAnchor constant:150],
-        [self.emptyView.leadingAnchor constraintGreaterThanOrEqualToAnchor:self.view.leadingAnchor constant:24],
-        [self.emptyView.trailingAnchor constraintLessThanOrEqualToAnchor:self.view.trailingAnchor constant:-24],
-    ]];
-
-    // search field in its primary position (large-title navigation bar)
-    self.search = [[UISearchController alloc] initWithSearchResultsController:nil];
-    self.search.searchResultsUpdater = self;
-    self.search.obscuresBackgroundDuringPresentation = NO;
-    UISearchBar *sb = self.search.searchBar;
-    sb.placeholder = @"Tìm tính năng";
-    sb.tintColor = UIColor.whiteColor;
-    if (@available(iOS 13.0, *)) {
-        sb.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
-        UISearchTextField *tf = sb.searchTextField;
-        tf.backgroundColor = [UIColor colorWithWhite:0 alpha:0.32];
-        tf.textColor = UIColor.whiteColor;
-        tf.tintColor = UIColor.whiteColor;
-        tf.attributedPlaceholder = [[NSAttributedString alloc] initWithString:@"Tìm tính năng"
-            attributes:@{ NSForegroundColorAttributeName: [UIColor colorWithWhite:1 alpha:0.8] }];
-        tf.leftView.tintColor = [UIColor colorWithWhite:1 alpha:0.8];
-    }
-    self.navigationItem.searchController = self.search;
-    self.navigationItem.hidesSearchBarWhenScrolling = NO;
-    self.definesPresentationContext = YES;
-
-    self.navigationItem.backButtonTitle = @"Menu";
-    [self refreshBarButtons];
-}
-
-- (void)refreshBarButtons
-{
-    if (ZXGlassOn()) {
-        self.navigationItem.rightBarButtonItem = ZXGlassBarButton(@"Xong", YES, self, @selector(close));
-        self.navigationItem.leftBarButtonItem = ZXGlassBarButton(@"Thu gọn", NO, self, @selector(collapse));
-    } else {
-        self.navigationItem.rightBarButtonItem =
-            [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemDone target:self action:@selector(close)];
-        self.navigationItem.leftBarButtonItem =
-            [[UIBarButtonItem alloc] initWithTitle:@"Thu gọn" style:UIBarButtonItemStylePlain target:self action:@selector(collapse)];
-    }
-    self.navigationItem.rightBarButtonItem.accessibilityLabel = @"Xong, đóng menu";
-    self.navigationItem.leftBarButtonItem.accessibilityHint = @"Thu menu thành bong bóng";
-}
-
-- (void)refreshBackdrop
-{
-    [self.backdrop removeFromSuperview];
-    self.backdrop = ZXMakeBackdrop();
-    self.backdrop.frame = self.view.bounds;
-    self.backdrop.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-    [self.view insertSubview:self.backdrop atIndex:0];
-}
-
-- (void)viewWillAppear:(BOOL)animated
-{
-    [super viewWillAppear:animated];
-    UINavigationBar *bar = self.navigationController.navigationBar;
-    ZXStyleNavBar(bar);
-    bar.prefersLargeTitles = YES;
-    self.navigationItem.largeTitleDisplayMode = UINavigationItemLargeTitleDisplayModeAlways;
-    [self refreshBackdrop];
-    [self refreshBarButtons];
-    [self.cv reloadData];   // refresh the "n/m" counters after returning from a category
-}
-
-- (void)viewWillTransitionToSize:(CGSize)size withTransitionCoordinator:(id<UIViewControllerTransitionCoordinator>)c
-{
-    [super viewWillTransitionToSize:size withTransitionCoordinator:c];
-    [self.cv.collectionViewLayout invalidateLayout];
-}
-
-- (void)collapse { [self dismissViewControllerAnimated:YES completion:^{ [ZXBubble show]; }]; }
-- (void)close { [ZXBubble hide]; [self dismissViewControllerAnimated:YES completion:nil]; }
-
-// ---- collection view
-
-- (NSInteger)collectionView:(UICollectionView *)cv numberOfItemsInSection:(NSInteger)section { return self.cats.count; }
-- (UICollectionViewCell *)collectionView:(UICollectionView *)cv cellForItemAtIndexPath:(NSIndexPath *)ip
-{
-    ZXTileCell *cell = [cv dequeueReusableCellWithReuseIdentifier:@"tile" forIndexPath:ip];
-    [cell configureWithCategory:self.cats[ip.item]];
-    return cell;
-}
-- (CGSize)collectionView:(UICollectionView *)cv layout:(UICollectionViewLayout *)l sizeForItemAtIndexPath:(NSIndexPath *)ip
-{
-    CGFloat w = cv.bounds.size.width, inset = 16, gap = 12;
-    BOOL big = UIContentSizeCategoryIsAccessibilityCategory(self.traitCollection.preferredContentSizeCategory);
-    if (big) return CGSizeMake(w - 2 * inset, 190);
-    return CGSizeMake(floor((w - 2 * inset - gap) / 2), 172);
-}
-- (void)collectionView:(UICollectionView *)cv willDisplayCell:(UICollectionViewCell *)cell forItemAtIndexPath:(NSIndexPath *)ip
-{
-    if ([self.shown containsObject:ip]) return;
-    [self.shown addObject:ip];
-    if (ZXReduceMotion()) return;
-    cell.alpha = 0;
-    cell.transform = CGAffineTransformConcat(CGAffineTransformMakeTranslation(0, 24), CGAffineTransformMakeScale(0.95, 0.95));
-    [UIView animateWithDuration:0.5 delay:ip.item * 0.045 usingSpringWithDamping:0.78 initialSpringVelocity:0.4
-                        options:UIViewAnimationOptionAllowUserInteraction animations:^{
-        cell.alpha = 1;
-        cell.transform = CGAffineTransformIdentity;
-    } completion:nil];
-}
-- (void)collectionView:(UICollectionView *)cv didSelectItemAtIndexPath:(NSIndexPath *)ip
-{
-    NSDictionary *cat = self.cats[ip.item];
-    ZXSettingsViewController *vc = [[ZXSettingsViewController alloc] initWithSections:@[cat] title:cat[@"title"]];
-    vc.showFooter = [cat[@"footer"] boolValue];
-    [self.navigationController pushViewController:vc animated:YES];
-}
-
-// ---- search
-
-- (void)updateSearchResultsForSearchController:(UISearchController *)sc
-{
-    NSString *raw = [(sc.searchBar.text ?: @"") stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
-    if (raw.length == 0) {
-        self.results.view.hidden = YES;
-        self.emptyView.hidden = YES;
-        self.cv.hidden = NO;
-        return;
-    }
-    NSArray<NSString *> *tokens = [[ZXFold(raw) componentsSeparatedByString:@" "] filteredArrayUsingPredicate:
-                                   [NSPredicate predicateWithFormat:@"length > 0"]];
-    NSMutableArray *secs = [NSMutableArray new];
-    for (NSDictionary *cat in self.cats) {
-        NSMutableArray *hits = [NSMutableArray new];
-        for (NSDictionary *it in cat[@"items"]) {
-            NSString *hay = ZXFold([NSString stringWithFormat:@"%@ %@ %@ %@", it[@"title"] ?: @"", it[@"sub"] ?: @"",
-                                    it[@"kw"] ?: @"", cat[@"title"]]);
-            BOOL all = YES;
-            for (NSString *t in tokens) if ([hay rangeOfString:t].location == NSNotFound) { all = NO; break; }
-            if (all) [hits addObject:it];
-        }
-        if (hits.count) [secs addObject:@{ @"title": cat[@"title"], @"items": hits }];
-    }
-    self.results.sections = secs;
-    [self.results.shownRows removeAllObjects];
-    [self.results.tableView reloadData];
-    self.results.view.hidden = (secs.count == 0);
-    self.cv.hidden = YES;
-    self.emptyView.hidden = (secs.count > 0);
-    self.emptyLabel.text = [NSString stringWithFormat:@"Không có tính năng nào khớp với “%@”.\nThử từ khác, ví dụ: đã xem, quảng cáo, ảnh, nền.", raw];
 }
 
 @end
@@ -1239,10 +1433,10 @@ static BOOL gSettingsHooked;
 static void ZXAddSettingsButton(UIViewController *vc)
 {
     UITableView *tv = nil;
-    @try { tv = [vc valueForKey:@"tableView"]; } @catch (NSException *e) { return; }
+    @try { tv = [vc valueForKey:@"tableView"]; } @catch (NSException *e) { (void)e; return; }
     if (![tv isKindOfClass:[UITableView class]]) return;
     UIView *footer = tv.tableFooterView;
-    if (footer.tag == kZXFooterTag) return; // already added
+    if (footer.tag == kZXFooterTag) return;
 
     CGFloat width = tv.bounds.size.width;
     CGFloat oldH = 0;
@@ -1250,8 +1444,8 @@ static void ZXAddSettingsButton(UIViewController *vc)
         oldH = footer.frame.size.height;
         if (oldH < 1)
             oldH = [footer systemLayoutSizeFittingSize:CGSizeMake(width, UILayoutFittingCompressedSize.height)
-                         withHorizontalFittingPriority:UILayoutPriorityRequired
-                               verticalFittingPriority:UILayoutPriorityFittingSizeLevel].height;
+                          withHorizontalFittingPriority:UILayoutPriorityRequired
+                                verticalFittingPriority:UILayoutPriorityFittingSizeLevel].height;
     }
     UIView *container = [[UIView alloc] initWithFrame:CGRectMake(0, 0, width, oldH + 76)];
     container.tag = kZXFooterTag;
@@ -1264,10 +1458,11 @@ static void ZXAddSettingsButton(UIViewController *vc)
     UIButton *b = [UIButton buttonWithType:UIButtonTypeSystem];
     b.frame = CGRectMake(16, oldH + 14, width - 32, 48);
     b.autoresizingMask = UIViewAutoresizingFlexibleWidth;
-    [b setTitle:@"NTHE" forState:UIControlStateNormal];
+    [b setTitle:@"thanhthe" forState:UIControlStateNormal];
+    [b setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
     b.titleLabel.font = [UIFont boldSystemFontOfSize:16];
-    b.backgroundColor = [UIColor colorWithRed:0.0 green:0.45 blue:1.0 alpha:0.12];
-    b.layer.cornerRadius = 10;
+    b.backgroundColor = ZXColorZaloRed();
+    b.layer.cornerRadius = 12;
     [b addTarget:[ZXUI class] action:@selector(show) forControlEvents:UIControlEventTouchUpInside];
     [container addSubview:b];
     tv.tableFooterView = container;
@@ -1292,26 +1487,15 @@ static void ZXHookSettingsButton(void)
     ZXLog(@"settings button hooked");
 }
 
-// ---------------------------------------------------------------- floating glass tab bar (experimental)
-//
-// Assumes Zalo's bottom bar (Tin nhắn / Danh bạ / Khám phá / Tường nhà / Cá nhân) is a real
-// UITabBar, found by walking the key window's view hierarchy. If Zalo instead draws it with a
-// fully custom view, ZXFindTabBar finds nothing and this whole feature silently does nothing.
-// The float effect works by rewriting the frame UIKit itself assigns to the bar: we swizzle
-// -setFrame: on the bar's own runtime class (not the static UITabBar class, in case Zalo
-// subclasses it and overrides layoutSubviews/setFrame: itself), so the inset position survives
-// every relayout (rotation, keyboard, safe-area changes) instead of being reset back to full width.
+// ---------------------------------------------------------------- floating tab bar (experimental)
 
 static const char kZXTabBarStyledKey;
 
-/// Zalo's own tab bar is ZDSTabBar (its design-system library), so we match by class name
-/// containing "tabbar" as well as isKindOfClass:[UITabBar class], in case it is not a real
-/// UITabBar subclass. Requires a reasonably wide frame and at least 2 real tab-item subviews
-/// (not just >1 subview — early during launch UIKit briefly has the bar up with only a single
-/// placeholder UITabBarButton stretched full-width, before Zalo finishes setting its 5 real
-/// items; grabbing it at that moment froze our floating/glass styling onto a single giant
-/// button instead of 5 separate icons) so we don't grab an unrelated helper view, or the real
-/// bar before it is actually populated.
+static UIVisualEffect *ZXTabBarBlurEffect(void)
+{
+    return [UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemChromeMaterialDark];
+}
+
 static UIView *ZXFindTabBar(UIView *root)
 {
     if (!root) return nil;
@@ -1349,9 +1533,6 @@ static NSString *ZXClassChain(Class c)
     return s;
 }
 
-/// Computes the floating/pill frame from `proposed`, the frame UIKit itself just tried to assign
-/// (full width, pinned to the very bottom). We only use its width and bottom edge as a reference
-/// so this keeps working across rotations and keyboard changes.
 static CGRect ZXFloatingTabBarFrame(UIView *bar, CGRect proposed)
 {
     CGFloat width = proposed.size.width > 0 ? proposed.size.width : bar.superview.bounds.size.width;
@@ -1364,20 +1545,11 @@ static CGRect ZXFloatingTabBarFrame(UIView *bar, CGRect proposed)
     return CGRectMake(margin, y, width - margin * 2, height);
 }
 
-// ---- press-and-drag "liquid" blob -------------------------------------------------------
-//
-// A glass pill that tracks the finger while the person long-presses and drags across the tab
-// bar, snapping to whichever item is nearest with a springy (slightly overshooting) animation
-// so the motion reads as elastic/liquid rather than a plain slide. Lifting the finger over an
-// item simulates a tap on that item's own button (UITabBarButton is a UIControl, so this is the
-// same mechanism a real touch would trigger) so dragging actually switches tabs, the way sliding
-// a finger across Control Center's own glass controls selects whatever is underneath it.
-
 @interface ZXTabBarBlob : NSObject
 @property (nonatomic, weak) UIView *bar;
 @property (nonatomic, weak) UIVisualEffectView *blob;
 @property (nonatomic, weak) UILongPressGestureRecognizer *gesture;
-@property (nonatomic, weak) UIView *startButton; // which button the finger first touched down on
+@property (nonatomic, weak) UIView *startButton;
 @end
 
 @implementation ZXTabBarBlob
@@ -1428,7 +1600,7 @@ static CGRect ZXFloatingTabBarFrame(UIView *bar, CGRect proposed)
 
     switch (g.state) {
         case UIGestureRecognizerStateBegan: {
-            self.startButton = target; // remember where the finger first landed
+            self.startButton = target;
             [self moveBlobTo:target];
             ZXNoteTabBarInteraction(bar);
             break;
@@ -1438,10 +1610,6 @@ static CGRect ZXFloatingTabBarFrame(UIView *bar, CGRect proposed)
             break;
         }
         case UIGestureRecognizerStateEnded: {
-            // Since this now begins on a plain touch-down (no hold required), a simple tap with
-            // no drag already reaches the real button natively (cancelsTouchesInView = NO), so
-            // only forward a synthetic tap here when the finger actually moved to a *different*
-            // tab than where it started — otherwise a normal tap would fire the tab switch twice.
             if (target != self.startButton && [target isKindOfClass:[UIControl class]])
                 [(UIControl *)target sendActionsForControlEvents:UIControlEventTouchUpInside];
             [UIView animateWithDuration:0.25 delay:0.12 options:0 animations:^{ self.blob.alpha = 0; } completion:nil];
@@ -1463,20 +1631,20 @@ static const char kZXTabBarBlobKey;
 static void ZXAttachTabBarBlob(UIView *bar)
 {
     if (objc_getAssociatedObject(bar, &kZXTabBarBlobKey)) return;
-    UIVisualEffectView *blob = [[UIVisualEffectView alloc] initWithEffect:ZXTabBarGlassEffect()];
+    UIVisualEffectView *blob = [[UIVisualEffectView alloc] initWithEffect:ZXTabBarBlurEffect()];
     blob.userInteractionEnabled = NO;
     blob.alpha = 0;
     blob.layer.cornerRadius = 20;
     if (@available(iOS 13.0, *)) blob.layer.cornerCurve = kCACornerCurveContinuous;
     blob.clipsToBounds = YES;
-    [bar insertSubview:blob atIndex:1]; // above our background glass, below the tab buttons
+    [bar insertSubview:blob atIndex:1];
 
     ZXTabBarBlob *h = [ZXTabBarBlob new];
     h.bar = bar;
     h.blob = blob;
     UILongPressGestureRecognizer *g = [[UILongPressGestureRecognizer alloc] initWithTarget:h action:@selector(handlePress:)];
-    g.minimumPressDuration = 0; // react to a touch+drag immediately, no hold required first
-    g.cancelsTouchesInView = NO; // let Zalo's own tap-to-switch keep working for a plain tap
+    g.minimumPressDuration = 0;
+    g.cancelsTouchesInView = NO;
     [bar addGestureRecognizer:g];
     h.gesture = g;
     objc_setAssociatedObject(bar, &kZXTabBarBlobKey, h, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
@@ -1490,15 +1658,6 @@ static void ZXDetachTabBarBlob(UIView *bar)
     if (h.gesture) [bar removeGestureRecognizer:h.gesture];
     objc_setAssociatedObject(bar, &kZXTabBarBlobKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 }
-
-// ---- auto-collapse to a small circle after being idle ------------------------------------
-//
-// If nobody touches the floating tab bar for ZXConfig.tabBarIdleSeconds (default 10s, 0 = never),
-// it shrinks away into a small round glass button sitting where its left edge was, showing the
-// current tab's own icon; tapping that button brings the full bar back. Uses a "generation"
-// counter instead of invalidating an NSTimer: every touch bumps the counter and schedules a
-// fresh idle check, and the check only actually collapses if its own generation is still the
-// latest one when it fires.
 
 @interface ZXTabBarCollapser : NSObject
 @property (nonatomic, weak) UIView *bar;
@@ -1514,22 +1673,18 @@ static void ZXDetachTabBarBlob(UIView *bar)
     if (self.pill || !self.bar.superview) return;
     UIButton *b = [UIButton buttonWithType:UIButtonTypeSystem];
     b.hidden = YES;
-    b.clipsToBounds = YES; // no border/frame around it — just the round glass + icon
-    b.backgroundColor = UIColor.clearColor;
+    b.clipsToBounds = YES;
+    b.backgroundColor = ZXColorCardBg();
+    b.layer.borderWidth = 1.0;
+    b.layer.borderColor = ZXColorCardBorder().CGColor;
     b.layer.shadowColor = UIColor.blackColor.CGColor;
-    b.layer.shadowOpacity = 0.15;
+    b.layer.shadowOpacity = 0.25;
     b.layer.shadowRadius = 5;
-    b.layer.shadowOffset = CGSizeMake(0, 1);
-
-    UIVisualEffectView *glass = [[UIVisualEffectView alloc] initWithEffect:ZXTabBarGlassEffect()];
-    glass.userInteractionEnabled = NO;
-    glass.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-    glass.frame = b.bounds;
-    [b addSubview:glass];
+    b.layer.shadowOffset = CGSizeMake(0, 2);
 
     UIImageView *iv = [[UIImageView alloc] init];
     iv.tag = 7001;
-    iv.contentMode = UIViewContentModeScaleAspectFit; // shrink to fit the small circle, never crop
+    iv.contentMode = UIViewContentModeScaleAspectFit;
     iv.translatesAutoresizingMaskIntoConstraints = NO;
     [b addSubview:iv];
     [NSLayoutConstraint activateConstraints:@[
@@ -1555,19 +1710,19 @@ static void ZXDetachTabBarBlob(UIView *bar)
         if (@available(iOS 13.0, *)) img = [UIImage systemImageNamed:@"circle.grid.2x2.fill"];
     }
     iv.image = [img imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
-    iv.tintColor = self.bar.tintColor ?: UIColor.systemBlueColor;
+    iv.tintColor = ZXColorZaloRed();
 }
 
 - (void)collapse
 {
     if (self.collapsed || !ZXFloatingTabBarOn()) return;
     UIView *bar = self.bar;
-    if (!bar || bar.alpha < 0.5) return; // already hidden/mid-transition
+    if (!bar || bar.alpha < 0.5) return;
     self.collapsed = YES;
     [self ensurePill];
     if (!self.pill) return;
     CGRect f = bar.frame;
-    CGFloat d = 40; // a small round button, not the full bar height
+    CGFloat d = 40;
     self.pill.frame = CGRectMake(f.origin.x, f.origin.y + (f.size.height - d) / 2, d, d);
     self.pill.layer.cornerRadius = d / 2;
     [self updatePillIcon];
@@ -1607,12 +1762,11 @@ static void ZXDetachTabBarBlob(UIView *bar)
 
 - (void)pillTapped { [self expand]; }
 
-/// Call whenever the person touches the (expanded) bar, to push the auto-collapse back out 10s.
 - (void)noteInteraction
 {
     self.idleGeneration++;
     double secs = [ZXConfig tabBarIdleSeconds];
-    if (secs <= 0) return; // 0 = auto-collapse disabled
+    if (secs <= 0) return;
     NSInteger gen = self.idleGeneration;
     __weak typeof(self) weakSelf = self;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(secs * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
@@ -1621,11 +1775,6 @@ static void ZXDetachTabBarBlob(UIView *bar)
     });
 }
 
-/// Zalo hides the real tab bar on screens that aren't one of the 5 main tabs — a photo/media
-/// viewer, a pushed detail screen, and so on — normally by setting it .hidden. Our collapsed
-/// pill is a separate sibling view though (not a subview of the bar), so it does not hide
-/// automatically along with it; without this it would keep floating over screens where Zalo's
-/// own bar is deliberately gone, blocking content that has nothing to do with the tab bar.
 - (void)syncWithBarHidden:(BOOL)barHidden
 {
     if (!self.pill) return;
@@ -1655,14 +1804,14 @@ static void ZXAttachTabBarCollapser(UIView *bar)
     c = [ZXTabBarCollapser new];
     c.bar = bar;
     objc_setAssociatedObject(bar, &kZXTabBarCollapserKey, c, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    [c noteInteraction]; // starts the first idle countdown
+    [c noteInteraction];
 }
 
 static void ZXDetachTabBarCollapser(UIView *bar)
 {
     ZXTabBarCollapser *c = objc_getAssociatedObject(bar, &kZXTabBarCollapserKey);
     if (!c) return;
-    c.idleGeneration++; // invalidates any pending collapse check
+    c.idleGeneration++;
     [c.pill removeFromSuperview];
     bar.alpha = 1;
     bar.userInteractionEnabled = YES;
@@ -1676,11 +1825,11 @@ static void ZXStyleTabBarOnce(UIView *bar)
 
     bar.layer.cornerRadius = 26;
     if (@available(iOS 13.0, *)) bar.layer.cornerCurve = kCACornerCurveContinuous;
-    bar.layer.masksToBounds = NO; // the glass subview clips itself; the bar's own layer keeps the drop shadow
-    bar.layer.borderWidth = 0.5;
-    bar.layer.borderColor = [UIColor colorWithWhite:1 alpha:0.2].CGColor;
+    bar.layer.masksToBounds = NO;
+    bar.layer.borderWidth = 1.0;
+    bar.layer.borderColor = ZXColorCardBorder().CGColor;
     bar.layer.shadowColor = UIColor.blackColor.CGColor;
-    bar.layer.shadowOpacity = 0.2;
+    bar.layer.shadowOpacity = 0.25;
     bar.layer.shadowRadius = 14;
     bar.layer.shadowOffset = CGSizeMake(0, 6);
 
@@ -1699,20 +1848,19 @@ static void ZXStyleTabBarOnce(UIView *bar)
             tb.translucent = YES;
         }
     } else {
-        // Not a real UITabBar (e.g. Zalo's own ZDSTabBar): best effort, just clear what we can.
         bar.backgroundColor = UIColor.clearColor;
         bar.opaque = NO;
         @try { [bar setValue:[UIImage new] forKey:@"backgroundImage"]; } @catch (__unused id e) {}
     }
 
-    UIVisualEffectView *glass = [[UIVisualEffectView alloc] initWithEffect:ZXTabBarGlassEffect()];
-    glass.frame = bar.bounds;
-    glass.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-    glass.layer.cornerRadius = 26;
-    if (@available(iOS 13.0, *)) glass.layer.cornerCurve = kCACornerCurveContinuous;
-    glass.clipsToBounds = YES;
-    glass.userInteractionEnabled = NO;
-    [bar insertSubview:glass atIndex:0];
+    UIVisualEffectView *blur = [[UIVisualEffectView alloc] initWithEffect:ZXTabBarBlurEffect()];
+    blur.frame = bar.bounds;
+    blur.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    blur.layer.cornerRadius = 26;
+    if (@available(iOS 13.0, *)) blur.layer.cornerCurve = kCACornerCurveContinuous;
+    blur.clipsToBounds = YES;
+    blur.userInteractionEnabled = NO;
+    [bar insertSubview:blur atIndex:0];
 }
 
 static void ZXUnstyleTabBar(UIView *bar)
@@ -1746,7 +1894,7 @@ static void ZXApplyFloatingTabBarState(UIView *bar)
     if (ZXFloatingTabBarOn()) {
         ZXStyleTabBarOnce(bar);
         CGRect full = bar.superview ? bar.superview.bounds : bar.frame;
-        bar.frame = ZXFloatingTabBarFrame(bar, full); // runs through our swizzled -setFrame: below
+        bar.frame = ZXFloatingTabBarFrame(bar, full);
         ZXAttachTabBarBlob(bar);
         ZXAttachTabBarCollapser(bar);
     } else {
@@ -1757,10 +1905,6 @@ static void ZXApplyFloatingTabBarState(UIView *bar)
     }
 }
 
-/// Finds the live tab bar (if Zalo uses one) and swizzles -setFrame: on its concrete runtime
-/// class once, so every future relayout keeps honoring the floating position while the toggle is on.
-/// Logs what it found the first time, even when the toggle is off, so a build's log says whether
-/// the tab bar was located at all and what class it actually is.
 static void ZXHookFloatingTabBar(void)
 {
     UIView *bar = ZXFindTabBarInAnyWindow();
@@ -1781,24 +1925,12 @@ static void ZXHookFloatingTabBar(void)
     if (!m) return;
     IMP orig = method_getImplementation(m);
     IMP newImp = imp_implementationWithBlock(^(UIView *self_, CGRect frame) {
-        // Only float it while Zalo actually means to show it — not on screens (a photo viewer,
-        // a pushed detail screen) where Zalo hides the real bar; respect that instead of forcing
-        // it back on top of content it has nothing to do with.
         if (ZXFloatingTabBarOn() && !self_.hidden) frame = ZXFloatingTabBarFrame(self_, frame);
         ((void (*)(id, SEL, CGRect))orig)(self_, sel, frame);
     });
     if (!class_addMethod(cls, sel, newImp, method_getTypeEncoding(m)))
         method_setImplementation(m, newImp);
 
-    // Zalo pins this bar to its superview with Auto Layout constraints (full width, bottom
-    // edge), so most of the time UIKit's constraint solver sets its bounds/center directly
-    // instead of calling -setFrame: at all — our swizzle above never even runs, and the bar
-    // snaps right back to full-width/edge-to-edge on the very next layout pass (rotation, a
-    // cell loading, anything). Swizzling -layoutSubviews catches that: once Auto Layout has
-    // finished positioning the bar for this pass, we re-apply our floating frame on top of
-    // whatever it just computed, using the superview's bounds (not our own possibly-already-
-    // shrunk frame) as the reference so this stays stable instead of shrinking a little more
-    // on every single pass.
     SEL layoutSel = @selector(layoutSubviews);
     Method lm = class_getInstanceMethod(cls, layoutSel);
     if (lm) {
@@ -1815,16 +1947,6 @@ static void ZXHookFloatingTabBar(void)
             method_setImplementation(lm, newLayoutImp);
     }
 
-    // Zalo can recreate or re-attach a tab bar of this same class later (returning from a
-    // modal/settings screen, a memory-pressure teardown, ...) without our discovery loop ever
-    // running again on it — that loop only fires for the first 60s after launch plus app-
-    // foreground events. The two swizzles above still force a fresh instance's *frame* into the
-    // floating shape (they are installed class-wide), but ZXStyleTabBarOnce's transparent
-    // background/corner radius and the blob/collapser only ever get attached through
-    // ZXApplyFloatingTabBarState, which that fresh instance would never receive. The visible
-    // result was a correctly-sized-but-still-opaque, square, full-width bar on screens reached
-    // a while after launch. Swizzling -didMoveToWindow catches every instance the moment it
-    // joins a window, however/whenever it was created, and (re)applies the full floating state.
     SEL windowSel = @selector(didMoveToWindow);
     Method wm = class_getInstanceMethod(cls, windowSel);
     if (wm) {
@@ -1837,11 +1959,6 @@ static void ZXHookFloatingTabBar(void)
             method_setImplementation(wm, newWindowImp);
     }
 
-    // The collapsed pill is a sibling view, not a subview of the bar, so it does not hide
-    // automatically along with it on screens where Zalo deliberately hides the real bar (a
-    // photo viewer, a pushed detail screen, ...). ZXTabBarCollapser already has the method for
-    // this (syncWithBarHidden:) — it just needed something to actually call it on every hide/
-    // show, which this swizzle provides.
     SEL hiddenSel = @selector(setHidden:);
     Method hm = class_getInstanceMethod(cls, hiddenSel);
     if (hm) {
@@ -1865,19 +1982,33 @@ static void ZXHookFloatingTabBar(void)
 
 + (void)install
 {
+    ZXHookBubbleShow();
     ZXHookSettingsButton();
     [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidFinishLaunchingNotification
                                                       object:nil queue:NSOperationQueue.mainQueue
-                                                  usingBlock:^(NSNotification *n) { ZXHookSettingsButton(); }];
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{ ZXHookSettingsButton(); });
-    // The tab bar may not exist yet right after launch (splash/login screens first), so keep
-    // trying every 3s for the first minute instead of relying on a single delayed check.
+                                                  usingBlock:^(NSNotification *n) {
+        (void)n;
+        ZXHookSettingsButton();
+        [ZXBubble show];
+        ZXRefreshFloatingBubbleNow();
+    }];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+        ZXHookSettingsButton();
+        [ZXBubble restoreIfNeeded];
+        ZXRefreshFloatingBubbleNow();
+    });
     for (int i = 1; i <= 20; i++) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, i * 3 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{ ZXHookFloatingTabBar(); });
     }
     [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidBecomeActiveNotification
                                                       object:nil queue:NSOperationQueue.mainQueue
-                                                  usingBlock:^(NSNotification *n) { [self attachGesture]; [ZXBubble restoreIfNeeded]; ZXHookFloatingTabBar(); }];
+                                                  usingBlock:^(NSNotification *n) {
+        (void)n;
+        [self attachGesture];
+        [ZXBubble restoreIfNeeded];
+        ZXRefreshFloatingBubbleNow();
+        ZXHookFloatingTabBar();
+    }];
 }
 
 + (void)attachGesture
@@ -1906,10 +2037,13 @@ static void ZXHookFloatingTabBar(void)
     if (!top) return;
     if ([top isKindOfClass:[UINavigationController class]]) {
         UIViewController *first = ((UINavigationController *)top).viewControllers.firstObject;
-        if ([first isKindOfClass:[ZXHomeViewController class]]) return;
+        if ([first isKindOfClass:[ZXMainViewController class]]) return;
     }
-    UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:[ZXHomeViewController new]];
+    ZXMainViewController *mainVC = [ZXMainViewController new];
+    UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:mainVC];
+    if (@available(iOS 13.0, *)) nav.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
     nav.modalPresentationStyle = UIModalPresentationFullScreen;
+    ZXStyleNavBar(nav.navigationBar);
     [top presentViewController:nav animated:YES completion:nil];
 }
 

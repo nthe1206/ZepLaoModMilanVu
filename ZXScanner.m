@@ -12,14 +12,18 @@
 
 + (NSString *)runScan
 {
-    // Scan 2: effects, media quality, chat background, font/text style, profile music
+    // Scan 2: effects, media quality, chat background, font/text style, profile music, hidden chats, story, call, voice
     NSArray<NSString *> *keywords = @[@"emitter", @"particle", @"lottie", @"magicword", @"keywordeffect", @"texteffect",
                                       @"chateffect", @"messageeffect", @"effectview", @"snow", @"firework", @"confetti",
                                       @"wallpaper", @"chatskin", @"chatbackground", @"chatbg", @"backgroundimage", @"themeitem",
                                       @"filesizelimit", @"maxfilesize", @"filelimit", @"maxsizefile", @"limitsend", @"checkfilesize",
                                       @"maxupload", @"sendfile", @"uploadlimit", @"qualitypicker", @"sendhd", @"originalquality",
                                       @"customfont", @"fontstyle", @"profilemusic", @"musicprofile",
-                                      @"sendsticker", @"stickersend", @"sendgif", @"sendstickerto", @"stickermessage"];
+                                      @"sendsticker", @"stickersend", @"sendgif", @"sendstickerto", @"stickermessage",
+                                      @"hiddenchat", @"ishidden", @"hiddenconversation", @"filterhidden", @"unhide",
+                                      @"storyseen", @"markstory", @"viewstory", @"sendseenstory",
+                                      @"icecandidate", @"icetransport", @"forcerelay", @"webrtc",
+                                      @"voicemessage", @"audiomessage", @"sendtext"];
     // Scan 3: video quality. A method counts only if its selector has "video" AND one of these words.
     NSArray<NSString *> *videoWords = @[@"quality", @"compress", @"export", @"preset", @"bitrate", @"resolution", @"hd", @"original",
                                         @"maxsize", @"upload", @"encode", @"convert", @"transcode", @"send", @"pickerquality"];

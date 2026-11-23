@@ -18,6 +18,20 @@
 #define ZXK_VIDEO_ORIGINAL         @"video_original"
 #define ZXK_TTL_OVERRIDE           @"enable_msg_ttl_override"
 #define ZXK_FLOATING_TABBAR        @"floating_tabbar_glass"
+#define ZXK_CUSTOM_LOGO_MODE       @"NTHE_CustomLogoMode"
+#define ZXK_BUBBLE_SIZE            @"NTHE_BubbleSize"
+
+// 6 new feature keys
+#define ZXK_UNHIDE_CHATS           @"nthe_unhide_hidden_chats"
+#define ZXK_CHAT_LOCK_ENABLED      @"nthe_chat_lock_enabled"
+#define ZXK_CHAT_LOCK_PIN          @"nthe_chat_lock_pin"
+#define ZXK_LOCKED_CHATS           @"nthe_locked_chats_list"
+#define ZXK_GHOST_STORY            @"nthe_ghost_story_seen"
+#define ZXK_MSG_REPEATER           @"nthe_message_repeater"
+#define ZXK_CALL_FORCE_RELAY       @"nthe_call_force_relay"
+#define ZXK_AUTO_CALL_RECORD       @"nthe_auto_call_record"
+#define ZXK_VOICE_MSG_TOOLS        @"nthe_voice_msg_tools"
+#define ZXK_VOICE_PLAYBACK_RATE    @"nthe_voice_playback_rate"
 
 @interface ZXConfig : NSObject
 + (void)registerDefaults;
@@ -31,6 +45,25 @@
 + (void)setTabBarIdleSeconds:(double)value;
 + (NSString *)currentUserID;
 + (void)setCurrentUserID:(NSString *)value;
++ (BOOL)customLogoMode;
++ (void)setCustomLogoMode:(BOOL)value;
++ (double)bubbleSize;
++ (void)setBubbleSize:(double)value;
+/// Documents/nthe_custom_logo.png
++ (NSString *)customLogoPath;
+/// PIN 4 digits for locked chats & hidden chats viewer
++ (NSString *)chatLockPIN;
++ (void)setChatLockPIN:(NSString *)pin;
+/// Array of @{ @"id": @"...", @"name": @"..." }
++ (NSArray<NSDictionary *> *)lockedChats;
++ (void)addLockedChatWithID:(NSString *)chatID name:(NSString *)name;
++ (void)removeLockedChatWithID:(NSString *)chatID;
++ (BOOL)isChatLocked:(NSString *)chatIDOrName;
+/// Voice playback speed (1.0, 1.5, 2.0)
++ (double)voicePlaybackRate;
++ (void)setVoicePlaybackRate:(double)rate;
+/// Documents/NTHE_CallRecords (created on demand)
++ (NSString *)callRecordsDir;
 /// Documents/ZaloXposed (created on demand)
 + (NSString *)dataDir;
 @end

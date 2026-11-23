@@ -8,6 +8,9 @@ static NSArray<NSString *> *ZXAdsFragments(void)      { return @[@"/group/ads", 
 static NSArray<NSString *> *ZXQoSFragments(void)      { return @[@"/api/qos/", @"/zalocloudqos"]; }
 static NSArray<NSString *> *ZXTrackingFragments(void) { return @[@"/tracking"]; }
 static NSArray<NSString *> *ZXFirebaseHosts(void)     { return @[@"firebaselogging", @"app-measurement.com", @"crashlytics.com"]; }
+static NSArray<NSString *> *ZXStorySeenFragments(void) {
+    return @[@"/story/seen", @"/story/view", @"/moment/seen", @"markstoryasseen", @"sendseenstory", @"story_seen", @"seen_story"];
+}
 
 static BOOL ZXContainsAny(NSString *s, NSArray<NSString *> *needles)
 {
@@ -64,6 +67,7 @@ static void ZXWrapConfigFactory(SEL s)
     if ([ZXConfig boolForKey:ZXK_BLOCK_QOS] && ZXContainsAny(s, ZXQoSFragments())) return YES;
     if ([ZXConfig boolForKey:ZXK_DISABLE_TRACKING] && ZXContainsAny(url.path ?: @"", ZXTrackingFragments())) return YES;
     if ([ZXConfig boolForKey:ZXK_DISABLE_FIREBASE] && ZXContainsAny(url.host ?: @"", ZXFirebaseHosts())) return YES;
+    if ([ZXConfig boolForKey:ZXK_GHOST_STORY] && ZXContainsAny(s, ZXStorySeenFragments())) return YES;
     return NO;
 }
 

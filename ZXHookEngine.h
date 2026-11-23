@@ -20,4 +20,13 @@
 + (void)installFromRules;
 + (void)ensureRulesFile;
 + (void)retryPending;
+
+// NTHE Extended Features
++ (NSArray<NSDictionary *> *)discoveredHiddenChats;
++ (BOOL)unhideChatWithID:(NSString *)chatID;
++ (BOOL)openChatWithID:(NSString *)chatID;
++ (NSURL *)lastVoiceMessageURL;
++ (BOOL)isCallRecording;
++ (void)toggleManualCallRecording;
++ (void)presentRepeaterDialogFromVC:(UIViewController *)vc;
 @end
