@@ -5,17 +5,19 @@ on:
     branches: [ main ]
 jobs:
   build:
-    runs-on: macos-latest
-    strategy:
-      matrix:
-        scheme: [ rootless ]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: Randomblock1/theos-action@v1
+      - name: Setup Theos & iOS SDK
+        run: |
+          sudo apt-get update && sudo apt-get install -y fakeroot dpkg-dev ldid clang make perl git curl unzip
+          git clone --recursive https://github.com/theos/theos.git ~/theos
+          mkdir -p ~/theos/sdks
+          curl -L https://github.com/theos/sdks/archive/master.zip -o sdks.zip
+          unzip -q sdks.zip && mv sdks-master/*.sdk ~/theos/sdks/
       - name: Build rootless
-        if: matrix.scheme == 'rootless'
-        run: make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless
+        run: make package FINALPACKAGE=1 THEOS=~/theos THEOS_PACKAGE_SCHEME=rootless
       - uses: actions/upload-artifact@v4
         with:
-          name: ZepLaoModMilanVu-${{ matrix.scheme }}
+          name: ZepLaoModMilanVu-rootless
           path: packages/*.deb
