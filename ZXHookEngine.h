@@ -23,10 +23,16 @@
 
 // NTHE Extended Features
 + (NSArray<NSDictionary *> *)discoveredHiddenChats;
++ (void)scanMemoryForHiddenChats;
 + (BOOL)unhideChatWithID:(NSString *)chatID;
 + (BOOL)openChatWithID:(NSString *)chatID;
 + (NSURL *)lastVoiceMessageURL;
 + (BOOL)isCallRecording;
 + (void)toggleManualCallRecording;
++ (BOOL)isSpamRunning;
++ (NSInteger)spamSentCount;
++ (NSInteger)spamTotalCount;
++ (void)stopSpamNow;
++ (void)startSpamWithText:(NSString *)text count:(NSInteger)count delay:(double)delay;
 + (void)presentRepeaterDialogFromVC:(UIViewController *)vc;
 @end

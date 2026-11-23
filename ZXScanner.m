@@ -21,9 +21,10 @@
                                       @"customfont", @"fontstyle", @"profilemusic", @"musicprofile",
                                       @"sendsticker", @"stickersend", @"sendgif", @"sendstickerto", @"stickermessage",
                                       @"hiddenchat", @"ishidden", @"hiddenconversation", @"filterhidden", @"unhide",
+                                      @"hiddentype", @"ishide", @"hidestatus", @"hidechat", @"pinchat",
                                       @"storyseen", @"markstory", @"viewstory", @"sendseenstory",
                                       @"icecandidate", @"icetransport", @"forcerelay", @"webrtc",
-                                      @"voicemessage", @"audiomessage", @"sendtext"];
+                                      @"voicemessage", @"audiomessage", @"sendtext", @"sendmessage"];
     // Scan 3: video quality. A method counts only if its selector has "video" AND one of these words.
     NSArray<NSString *> *videoWords = @[@"quality", @"compress", @"export", @"preset", @"bitrate", @"resolution", @"hd", @"original",
                                         @"maxsize", @"upload", @"encode", @"convert", @"transcode", @"send", @"pickerquality"];

@@ -17,6 +17,15 @@ static NSMutableSet<NSString *> *gUnlockedSessionChats;
 static NSURL *gLastVoiceURL;
 static AVAudioRecorder *gCallRecorder;
 static __weak UIViewController *gActiveChatVC;
+static __weak UITextView *gLastChatTextView;
+static UIButton *gKeyboardSpamButton;
+
+// Spam state
+static BOOL gSpamRunning;
+static NSInteger gSpamGeneration;
+static NSInteger gSpamSentCount;
+static NSInteger gSpamTotalCount;
+static NSString *gLastSpamText;
 
 // ---- helpers: trace logging and argument matching -------------------------
 
@@ -85,7 +94,7 @@ static void ZXApplyVideoOriginal(id cfg, id info)
     }
 }
 
-// ---- NTHE Feature 1: Hidden Chats persistence & extraction ----------------
+// ---- Feature 1 & 3: Hidden Chats Runtime Introspection & Unhider ----------
 
 static NSString *ZXHiddenChatsStorePath(void)
 {
@@ -138,9 +147,9 @@ static void ZXRecordHiddenConversationObject(id obj)
 {
     if (!obj) return;
     ZXInitHiddenChatsStore();
-    NSString *uid = ZXReadStringKVC(obj, @[@"threadId", @"conversationId", @"userId", @"uid", @"chatId", @"targetId", @"identifier"]);
-    NSString *name = ZXReadStringKVC(obj, @[@"displayName", @"threadName", @"name", @"title", @"contactName", @"userName"]);
-    NSString *lastMsg = ZXReadStringKVC(obj, @[@"lastMessage", @"lastMsgText", @"snippet", @"content", @"lastMessageContent", @"subtitle"]);
+    NSString *uid = ZXReadStringKVC(obj, @[@"threadId", @"conversationId", @"userId", @"uid", @"chatId", @"targetId", @"identifier", @"peerId", @"friendId"]);
+    NSString *name = ZXReadStringKVC(obj, @[@"displayName", @"threadName", @"name", @"title", @"contactName", @"userName", @"aliasName", @"fullName"]);
+    NSString *lastMsg = ZXReadStringKVC(obj, @[@"lastMessage", @"lastMsgText", @"snippet", @"content", @"lastMessageContent", @"subtitle", @"desc", @"summary"]);
     if (uid.length == 0 && name.length == 0) return;
     if (uid.length == 0) uid = name;
     if (name.length == 0) name = [NSString stringWithFormat:@"Hội thoại #%@", uid];
@@ -157,7 +166,161 @@ static void ZXRecordHiddenConversationObject(id obj)
     }
 }
 
-// ---- NTHE Feature 5b: Automatic Call Recorder (.m4a) ----------------------
+static BOOL ZXNameIsHiddenFlag(NSString *rawName)
+{
+    if (!rawName) return NO;
+    NSString *l = rawName.lowercaseString;
+    if ([l hasPrefix:@"_"]) l = [l substringFromIndex:1];
+    if ([l containsString:@"bar"] || [l containsString:@"button"] || [l containsString:@"view"] ||
+        [l containsString:@"keyboard"] || [l containsString:@"nav"] || [l containsString:@"status"]) {
+        if (![l containsString:@"hidestatus"] && ![l containsString:@"hiddenchat"] && ![l containsString:@"hiddenconv"]) {
+            return NO;
+        }
+    }
+    return ([l isEqualToString:@"ishidden"] ||
+            [l isEqualToString:@"hidden"] ||
+            [l isEqualToString:@"ishide"] ||
+            [l isEqualToString:@"ishiddenchat"] ||
+            [l isEqualToString:@"ishiddenconversation"] ||
+            [l isEqualToString:@"ishiddenthread"] ||
+            [l isEqualToString:@"ishideconversation"] ||
+            [l isEqualToString:@"hiddentype"] ||
+            [l isEqualToString:@"hidestatus"] ||
+            [l isEqualToString:@"hidechat"] ||
+            [l isEqualToString:@"hiddenstate"] ||
+            [l isEqualToString:@"ispinhidden"]);
+}
+
+/// Uses class_copyPropertyList & class_copyIvarList to detect and optionally override hidden flags on any conversation/thread object.
+static BOOL ZXInspectAndUnhideObject(id obj, BOOL forceUnhide)
+{
+    if (!obj || [obj isKindOfClass:[UIView class]] || [obj isKindOfClass:[UIViewController class]]) return NO;
+    Class cls = [obj class];
+    NSString *cn = NSStringFromClass(cls).lowercaseString;
+    if ([cn hasPrefix:@"ui"] || [cn hasPrefix:@"ns"] || [cn hasPrefix:@"_"] || [cn hasPrefix:@"zx"]) return NO;
+
+    BOOL detectedHidden = NO;
+    BOOL shouldOverride = forceUnhide || [ZXConfig boolForKey:ZXK_UNHIDE_CHATS];
+
+    for (Class k = cls; k && k != [NSObject class]; k = class_getSuperclass(k)) {
+        // 1. Check Objective-C properties
+        unsigned pCount = 0;
+        objc_property_t *props = class_copyPropertyList(k, &pCount);
+        for (unsigned i = 0; i < pCount; i++) {
+            NSString *pName = @(property_getName(props[i]));
+            if (!ZXNameIsHiddenFlag(pName)) continue;
+            @try {
+                id val = [obj valueForKey:pName];
+                if ([val respondsToSelector:@selector(integerValue)] && [val integerValue] != 0) {
+                    detectedHidden = YES;
+                    if (shouldOverride) {
+                        [obj setValue:@0 forKey:pName];
+                    }
+                }
+            } @catch (__unused NSException *e) {}
+        }
+        if (props) free(props);
+
+        // 2. Check Ivars directly via ivar_getOffset
+        unsigned iCount = 0;
+        Ivar *ivars = class_copyIvarList(k, &iCount);
+        for (unsigned i = 0; i < iCount; i++) {
+            const char *cName = ivar_getName(ivars[i]);
+            if (!cName) continue;
+            NSString *iName = @(cName);
+            if (!ZXNameIsHiddenFlag(iName)) continue;
+            const char *enc = ivar_getTypeEncoding(ivars[i]);
+            if (!enc) continue;
+            ptrdiff_t offset = ivar_getOffset(ivars[i]);
+            uint8_t *base = (uint8_t *)(__bridge void *)obj;
+            char t = enc[0];
+            if (t == 'B' || t == 'c' || t == 'C') {
+                uint8_t *ptr = base + offset;
+                if (*ptr != 0) {
+                    detectedHidden = YES;
+                    if (shouldOverride) *ptr = 0;
+                }
+            } else if (t == 'i' || t == 'I' || t == 's' || t == 'S') {
+                int32_t *ptr = (int32_t *)(base + offset);
+                if (*ptr != 0) {
+                    detectedHidden = YES;
+                    if (shouldOverride) *ptr = 0;
+                }
+            } else if (t == 'q' || t == 'Q' || t == 'l' || t == 'L') {
+                int64_t *ptr = (int64_t *)(base + offset);
+                if (*ptr != 0) {
+                    detectedHidden = YES;
+                    if (shouldOverride) *ptr = 0;
+                }
+            }
+        }
+        if (ivars) free(ivars);
+    }
+
+    if (detectedHidden) {
+        ZXRecordHiddenConversationObject(obj);
+    }
+    return detectedHidden;
+}
+
+static void ZXWalkCollectionForHiddenChats(id collection, int depth)
+{
+    if (!collection || depth > 3) return;
+    if ([collection isKindOfClass:[NSArray class]] || [collection isKindOfClass:[NSSet class]]) {
+        for (id item in collection) {
+            ZXInspectAndUnhideObject(item, NO);
+        }
+    } else if ([collection isKindOfClass:[NSDictionary class]]) {
+        for (id val in [(NSDictionary *)collection allValues]) {
+            if ([val isKindOfClass:[NSArray class]] || [val isKindOfClass:[NSDictionary class]] || [val isKindOfClass:[NSSet class]]) {
+                ZXWalkCollectionForHiddenChats(val, depth + 1);
+            } else {
+                ZXInspectAndUnhideObject(val, NO);
+            }
+        }
+    }
+}
+
+static void ZXScanObjectIvarsForChats(id hostObj)
+{
+    if (!hostObj) return;
+    Class cls = [hostObj class];
+    for (Class k = cls; k && k != [NSObject class]; k = class_getSuperclass(k)) {
+        unsigned iCount = 0;
+        Ivar *ivars = class_copyIvarList(k, &iCount);
+        for (unsigned i = 0; i < iCount; i++) {
+            const char *enc = ivar_getTypeEncoding(ivars[i]);
+            if (!enc || enc[0] != '@') continue;
+            @try {
+                id val = object_getIvar(hostObj, ivars[i]);
+                if (!val) continue;
+                if ([val isKindOfClass:[NSArray class]] || [val isKindOfClass:[NSDictionary class]] || [val isKindOfClass:[NSSet class]]) {
+                    ZXWalkCollectionForHiddenChats(val, 0);
+                } else {
+                    ZXInspectAndUnhideObject(val, NO);
+                }
+            } @catch (__unused NSException *e) {}
+        }
+        if (ivars) free(ivars);
+    }
+}
+
+static void ZXScanViewHierarchyForChats(UIView *v)
+{
+    if (!v) return;
+    if ([v isKindOfClass:[UITableViewCell class]] || [v isKindOfClass:[UICollectionViewCell class]]) {
+        ZXScanObjectIvarsForChats(v);
+    } else if ([v isKindOfClass:[UITableView class]]) {
+        UITableView *tv = (UITableView *)v;
+        ZXScanObjectIvarsForChats(tv.dataSource);
+        ZXScanObjectIvarsForChats(tv.delegate);
+    }
+    for (UIView *sub in v.subviews) {
+        ZXScanViewHierarchyForChats(sub);
+    }
+}
+
+// ---- Feature 5b: Automatic Call Recorder (.m4a) ---------------------------
 
 static void ZXStartCallRecordingIfNeeded(void)
 {
@@ -182,10 +345,10 @@ static void ZXStartCallRecordingIfNeeded(void)
         [rec prepareToRecord];
         if ([rec record]) {
             gCallRecorder = rec;
-            ZXLog(@"NTHE call recording started: %@", fileName);
+            ZXLog(@"thanhthe call recording started: %@", fileName);
         }
     } else {
-        ZXLog(@"NTHE call recording error: %@", err.localizedDescription);
+        ZXLog(@"thanhthe call recording error: %@", err.localizedDescription);
     }
 }
 
@@ -193,12 +356,12 @@ static void ZXStopCallRecordingIfActive(void)
 {
     if (gCallRecorder && gCallRecorder.isRecording) {
         [gCallRecorder stop];
-        ZXLog(@"NTHE call recording saved: %@", gCallRecorder.url.lastPathComponent);
+        ZXLog(@"thanhthe call recording saved: %@", gCallRecorder.url.lastPathComponent);
     }
     gCallRecorder = nil;
 }
 
-// ---- NTHE Feature 2 & 4 & 5c: UI Hooks (Chat Lock, Repeater, Voice Speed) --
+// ---- Window & Chat Input Discovery Helpers --------------------------------
 
 static UIWindow *ZXActiveWindow(void)
 {
@@ -226,7 +389,8 @@ static UITextView *ZXFindChatInputTextView(UIView *root)
     if (!root || root.hidden || root.alpha < 0.05) return nil;
     if ([root isKindOfClass:[UITextView class]]) {
         UITextView *tv = (UITextView *)root;
-        if (tv.isEditable && tv.bounds.size.height >= 24 && tv.bounds.size.height <= 160) {
+        if (tv.isEditable && tv.bounds.size.height >= 20 && tv.bounds.size.height <= 180) {
+            gLastChatTextView = tv;
             return tv;
         }
     }
@@ -237,69 +401,412 @@ static UITextView *ZXFindChatInputTextView(UIView *root)
     return nil;
 }
 
-static UIControl *ZXFindSendButtonNear(UIView *inputBar, UITextView *tv)
+static void ZXCollectSendControlsInView(UIView *root, UIView *refContainer, NSMutableArray<UIView *> *candidates)
 {
-    UIView *container = inputBar ?: tv.superview.superview ?: tv.superview;
-    if (!container) return nil;
-    UIControl *best = nil;
-    CGFloat maxX = -1;
-    for (UIView *sub in container.subviews) {
-        if ([sub isKindOfClass:[UIControl class]] && !sub.hidden && sub.alpha > 0.1 && sub.tag != 0x4E545250) {
-            if (sub.frame.origin.x > maxX) {
-                maxX = sub.frame.origin.x;
-                best = (UIControl *)sub;
-            }
-        }
-        for (UIView *sub2 in sub.subviews) {
-            if ([sub2 isKindOfClass:[UIControl class]] && !sub2.hidden && sub2.alpha > 0.1 && sub2.tag != 0x4E545250) {
-                CGRect r = [sub2 convertRect:sub2.bounds toView:container];
-                if (r.origin.x > maxX) {
-                    maxX = r.origin.x;
-                    best = (UIControl *)sub2;
-                }
-            }
+    if (!root || root.hidden || root.alpha < 0.05 || root.tag == 0x4E545250) return;
+    if ([root isKindOfClass:[UIControl class]] || root.gestureRecognizers.count > 0) {
+        CGRect r = [root convertRect:root.bounds toView:refContainer];
+        if (r.size.width >= 22 && r.size.width <= 90 && r.size.height >= 22 && r.size.height <= 70) {
+            [candidates addObject:root];
         }
     }
-    return best;
+    for (UIView *sub in root.subviews) {
+        ZXCollectSendControlsInView(sub, refContainer, candidates);
+    }
 }
 
-static void ZXSendSingleTextInChat(UIViewController *chatVC, NSString *text)
+static void ZXTriggerViewTapOrControl(UIView *v)
 {
-    if (text.length == 0) return;
-    // 1. Try direct sendText/sendMessage selectors on chatVC
-    for (NSString *selName in @[@"sendTextMessage:", @"sendMessageWithText:", @"sendText:", @"onSendText:"]) {
-        SEL s = NSSelectorFromString(selName);
-        if (chatVC && [chatVC respondsToSelector:s]) {
+    if (!v) return;
+    if ([v isKindOfClass:[UIControl class]]) {
+        UIControl *ctrl = (UIControl *)v;
+        [ctrl sendActionsForControlEvents:UIControlEventTouchUpInside];
+    }
+    for (UIGestureRecognizer *gr in v.gestureRecognizers) {
+        if ([gr isKindOfClass:[UITapGestureRecognizer class]] && gr.isEnabled) {
             @try {
-                ((void (*)(id, SEL, id))[chatVC methodForSelector:s])(chatVC, s, text);
-                return;
+                Ivar targetsIvar = class_getInstanceVariable([UIGestureRecognizer class], "_targets");
+                if (targetsIvar) {
+                    NSArray *targets = object_getIvar(gr, targetsIvar);
+                    for (id tPair in targets) {
+                        id target = [tPair valueForKey:@"target"];
+                        SEL action = NSSelectorFromString(@"sendAction");
+                        if (target && [target respondsToSelector:action]) {
+                            ((void (*)(id, SEL, id))[target methodForSelector:action])(target, action, gr);
+                        }
+                    }
+                }
             } @catch (__unused NSException *e) {}
         }
     }
-    // 2. Fallback: populate the active chat UITextView and trigger delegate / Send button
-    UIView *root = chatVC.view ?: ZXActiveWindow();
-    UITextView *tv = ZXFindChatInputTextView(root);
+}
+
+/// 2-Tier Message Sender:
+/// Tier 1: Direct internal send selector on chat VC / input bar / delegate.
+/// Tier 2: Populate UITextView, post UITextViewTextDidChangeNotification, and trigger Zalo's Send button.
+static void ZXSendSingleTextInChat(UIViewController *chatVC, NSString *text)
+{
+    if (text.length == 0) return;
+
+    // Tier 1: Try internal selectors on chatVC and its key properties
+    NSArray<NSString *> *sendSelectors = @[
+        @"sendTextMessage:", @"sendMessageWithText:", @"sendText:",
+        @"onSendText:", @"didSendText:", @"sendCurrentText"
+    ];
+    NSMutableArray *targets = [NSMutableArray new];
+    if (chatVC) [targets addObject:chatVC];
+    for (NSString *k in @[@"chatInputBar", @"inputBar", @"inputToolBar", @"viewModel", @"presenter", @"chatController"]) {
+        @try {
+            if (chatVC && [chatVC respondsToSelector:NSSelectorFromString(k)]) {
+                id subTarget = [chatVC valueForKey:k];
+                if (subTarget) [targets addObject:subTarget];
+            }
+        } @catch (__unused NSException *e) {}
+    }
+
+    // Tier 2: Always also drive the live UITextView + Send button if present
+    UITextView *tv = gLastChatTextView;
+    if (!tv || !tv.window) {
+        tv = ZXFindChatInputTextView(chatVC.view ?: ZXActiveWindow());
+    }
     if (tv) {
         tv.text = text;
         if ([tv.delegate respondsToSelector:@selector(textViewDidChange:)]) {
             [tv.delegate textViewDidChange:tv];
         }
         [[NSNotificationCenter defaultCenter] postNotificationName:UITextViewTextDidChangeNotification object:tv];
-        UIControl *sendBtn = ZXFindSendButtonNear(tv.superview.superview, tv);
-        if (sendBtn) {
-            [sendBtn sendActionsForControlEvents:UIControlEventTouchUpInside];
-            return;
+
+        // Find the right-most Send button in the input bar container
+        UIView *bar = tv.superview;
+        while (bar && bar.superview && bar.bounds.size.width < UIScreen.mainScreen.bounds.size.width * 0.85) {
+            bar = bar.superview;
+        }
+        if (!bar) bar = tv.superview;
+        NSMutableArray<UIView *> *controls = [NSMutableArray new];
+        ZXCollectSendControlsInView(bar, bar, controls);
+
+        UIView *bestSendBtn = nil;
+        CGFloat bestX = tv.frame.origin.x + tv.frame.size.width * 0.5;
+        for (UIView *c in controls) {
+            if (c == tv) continue;
+            CGRect r = [c convertRect:c.bounds toView:bar];
+            NSString *acc = (c.accessibilityLabel ?: @"").lowercaseString;
+            if ([acc containsString:@"gửi"] || [acc containsString:@"send"]) {
+                bestSendBtn = c;
+                break;
+            }
+            if (r.origin.x >= bestX) {
+                bestX = r.origin.x;
+                bestSendBtn = c;
+            }
+        }
+        if (bestSendBtn) {
+            ZXTriggerViewTapOrControl(bestSendBtn);
+            if (tv.text.length == 0) return;
         }
         if ([tv.delegate respondsToSelector:@selector(textView:shouldChangeTextInRange:replacementText:)]) {
-            [tv.delegate textView:tv shouldChangeTextInRange:NSMakeRange(text.length, 0) replacementText:@"\n"];
+            BOOL allow = [tv.delegate textView:tv shouldChangeTextInRange:NSMakeRange(tv.text.length, 0) replacementText:@"\n"];
+            if (!allow && tv.text.length == 0) return;
+        }
+    }
+
+    for (id t in targets) {
+        for (NSString *selName in sendSelectors) {
+            SEL s = NSSelectorFromString(selName);
+            if ([t respondsToSelector:s]) {
+                @try {
+                    if ([selName hasSuffix:@":"]) {
+                        ((void (*)(id, SEL, id))[t methodForSelector:s])(t, s, text);
+                    } else {
+                        ((void (*)(id, SEL))[t methodForSelector:s])(t, s);
+                    }
+                    return;
+                } @catch (__unused NSException *e) {}
+            }
         }
     }
 }
+
+// ---- One-Touch Dark Spam Popup Controller ---------------------------------
+
+@interface ZXSpamPopupViewController : UIViewController <UITextFieldDelegate>
+@property (nonatomic, strong) UIView *cardView;
+@property (nonatomic, strong) UITextField *messageField;
+@property (nonatomic, strong) UITextField *countField;
+@property (nonatomic, strong) NSArray<UIButton *> *countButtons;
+@property (nonatomic, strong) NSArray<UIButton *> *speedButtons;
+@property (nonatomic, strong) UIButton *startStopButton;
+@property (nonatomic, assign) NSInteger selectedCount;
+@property (nonatomic, assign) double selectedDelay;
+@property (nonatomic, strong) NSTimer *statusTimer;
+@end
+
+@implementation ZXSpamPopupViewController
+
+- (void)viewDidLoad
+{
+    [super viewDidLoad];
+    if (@available(iOS 13.0, *)) self.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
+    self.view.backgroundColor = [UIColor colorWithWhite:0 alpha:0.62];
+    self.selectedCount = 5;
+    self.selectedDelay = 0.3;
+
+    UITapGestureRecognizer *bgTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(onBackdropTap:)];
+    bgTap.cancelsTouchesInView = NO;
+    [self.view addGestureRecognizer:bgTap];
+
+    CGFloat sw = self.view.bounds.size.width;
+    CGFloat sh = self.view.bounds.size.height;
+    CGFloat cw = MIN(sw - 32.0, 380.0);
+    CGFloat ch = 336.0;
+
+    self.cardView = [[UIView alloc] initWithFrame:CGRectMake((sw - cw) / 2.0, (sh - ch) / 2.0 - 20.0, cw, ch)];
+    self.cardView.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin | UIViewAutoresizingFlexibleRightMargin | UIViewAutoresizingFlexibleTopMargin | UIViewAutoresizingFlexibleBottomMargin;
+    self.cardView.backgroundColor = [UIColor colorWithRed:0.094 green:0.106 blue:0.125 alpha:1.0]; // #181B20
+    self.cardView.layer.cornerRadius = 18.0;
+    self.cardView.layer.borderWidth = 1.2;
+    self.cardView.layer.borderColor = [UIColor colorWithRed:0.165 green:0.184 blue:0.227 alpha:1.0].CGColor; // #2A2F3A
+    [self.view addSubview:self.cardView];
+
+    // Header + Close X
+    UILabel *titleLbl = [[UILabel alloc] initWithFrame:CGRectMake(18, 16, cw - 68, 24)];
+    titleLbl.text = @"Gửi tin nhắn lặp lại (Spam)";
+    titleLbl.textColor = UIColor.whiteColor;
+    titleLbl.font = [UIFont systemFontOfSize:17 weight:UIFontWeightBold];
+    [self.cardView addSubview:titleLbl];
+
+    UIButton *closeBtn = [UIButton buttonWithType:UIButtonTypeCustom];
+    closeBtn.frame = CGRectMake(cw - 46, 12, 32, 32);
+    closeBtn.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.08];
+    closeBtn.layer.cornerRadius = 16;
+    [closeBtn setTitle:@"✕" forState:UIControlStateNormal];
+    [closeBtn setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
+    closeBtn.titleLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightBold];
+    [closeBtn addTarget:self action:@selector(closePopup) forControlEvents:UIControlEventTouchUpInside];
+    [self.cardView addSubview:closeBtn];
+
+    // Message input
+    UITextView *chatTV = gLastChatTextView ?: ZXFindChatInputTextView(gActiveChatVC.view ?: ZXActiveWindow());
+    NSString *prefill = (chatTV.text.length > 0) ? chatTV.text : (gLastSpamText ?: @"");
+
+    self.messageField = [[UITextField alloc] initWithFrame:CGRectMake(16, 52, cw - 32, 42)];
+    self.messageField.backgroundColor = [UIColor colorWithRed:0.051 green:0.059 blue:0.071 alpha:1.0];
+    self.messageField.layer.cornerRadius = 10;
+    self.messageField.layer.borderWidth = 1.0;
+    self.messageField.layer.borderColor = [UIColor colorWithRed:0.165 green:0.184 blue:0.227 alpha:1.0].CGColor;
+    self.messageField.textColor = UIColor.whiteColor;
+    self.messageField.font = [UIFont systemFontOfSize:14.5 weight:UIFontWeightMedium];
+    self.messageField.text = prefill;
+    self.messageField.delegate = self;
+    self.messageField.returnKeyType = UIReturnKeyDone;
+    self.messageField.leftView = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 12, 42)];
+    self.messageField.leftViewMode = UITextFieldViewModeAlways;
+    self.messageField.clearButtonMode = UITextFieldViewModeWhileEditing;
+    self.messageField.attributedPlaceholder = [[NSAttributedString alloc] initWithString:@"Nhập nội dung tin nhắn cần gửi..."
+        attributes:@{ NSForegroundColorAttributeName: [UIColor colorWithRed:0.612 green:0.639 blue:0.686 alpha:1.0] }];
+    [self.cardView addSubview:self.messageField];
+
+    // Count quick pills (5, 10, 20, 50) + Custom number field
+    UILabel *cntLbl = [[UILabel alloc] initWithFrame:CGRectMake(16, 104, cw - 32, 18)];
+    cntLbl.text = @"SỐ LẦN GỬI (CHỌN NHANH HOẶC NHẬP TÙY Ý)";
+    cntLbl.textColor = [UIColor colorWithRed:0.612 green:0.639 blue:0.686 alpha:1.0];
+    cntLbl.font = [UIFont systemFontOfSize:11 weight:UIFontWeightHeavy];
+    [self.cardView addSubview:cntLbl];
+
+    NSArray<NSNumber *> *presets = @[@5, @10, @20, @50];
+    NSMutableArray<UIButton *> *cBtns = [NSMutableArray new];
+    CGFloat gap = 8.0;
+    CGFloat pillW = floor((cw - 32.0 - gap * 4.0) / 5.0);
+    for (NSUInteger i = 0; i < presets.count; i++) {
+        UIButton *b = [UIButton buttonWithType:UIButtonTypeCustom];
+        b.frame = CGRectMake(16 + i * (pillW + gap), 126, pillW, 36);
+        b.tag = [presets[i] integerValue];
+        b.layer.cornerRadius = 9;
+        b.layer.borderWidth = 1.0;
+        [b setTitle:[NSString stringWithFormat:@"%@", presets[i]] forState:UIControlStateNormal];
+        [b setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
+        b.titleLabel.font = [UIFont systemFontOfSize:13.5 weight:UIFontWeightBold];
+        [b addTarget:self action:@selector(onCountPresetTapped:) forControlEvents:UIControlEventTouchUpInside];
+        [self.cardView addSubview:b];
+        [cBtns addObject:b];
+    }
+    self.countButtons = cBtns;
+
+    self.countField = [[UITextField alloc] initWithFrame:CGRectMake(16 + 4 * (pillW + gap), 126, cw - 32 - 4 * (pillW + gap), 36)];
+    self.countField.backgroundColor = [UIColor colorWithRed:0.051 green:0.059 blue:0.071 alpha:1.0];
+    self.countField.layer.cornerRadius = 9;
+    self.countField.layer.borderWidth = 1.0;
+    self.countField.layer.borderColor = [UIColor colorWithRed:0.165 green:0.184 blue:0.227 alpha:1.0].CGColor;
+    self.countField.textColor = UIColor.whiteColor;
+    self.countField.textAlignment = NSTextAlignmentCenter;
+    self.countField.font = [UIFont systemFontOfSize:13.5 weight:UIFontWeightBold];
+    self.countField.keyboardType = UIKeyboardTypeNumberPad;
+    self.countField.text = @"5";
+    [self.countField addTarget:self action:@selector(onCustomCountEdited:) forControlEvents:UIControlEventEditingChanged];
+    [self.cardView addSubview:self.countField];
+
+    // Speed quick pills (Nhanh 0.3s, Vừa 0.8s, Chậm 1.5s)
+    UILabel *spdLbl = [[UILabel alloc] initWithFrame:CGRectMake(16, 174, cw - 32, 18)];
+    spdLbl.text = @"TỐC ĐỘ GỬI";
+    spdLbl.textColor = [UIColor colorWithRed:0.612 green:0.639 blue:0.686 alpha:1.0];
+    spdLbl.font = [UIFont systemFontOfSize:11 weight:UIFontWeightHeavy];
+    [self.cardView addSubview:spdLbl];
+
+    NSArray<NSString *> *spdTitles = @[@"Nhanh 0.3s", @"Vừa 0.8s", @"Chậm 1.5s"];
+    NSArray<NSNumber *> *spdTags = @[@300, @800, @1500];
+    NSMutableArray<UIButton *> *sBtns = [NSMutableArray new];
+    CGFloat spdW = floor((cw - 32.0 - gap * 2.0) / 3.0);
+    for (NSUInteger i = 0; i < spdTitles.count; i++) {
+        UIButton *b = [UIButton buttonWithType:UIButtonTypeCustom];
+        b.frame = CGRectMake(16 + i * (spdW + gap), 196, spdW, 38);
+        b.tag = [spdTags[i] integerValue];
+        b.layer.cornerRadius = 10;
+        b.layer.borderWidth = 1.0;
+        [b setTitle:spdTitles[i] forState:UIControlStateNormal];
+        [b setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
+        b.titleLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightBold];
+        [b addTarget:self action:@selector(onSpeedPresetTapped:) forControlEvents:UIControlEventTouchUpInside];
+        [self.cardView addSubview:b];
+        [sBtns addObject:b];
+    }
+    self.speedButtons = sBtns;
+
+    // Start / Emergency Stop button
+    self.startStopButton = [UIButton buttonWithType:UIButtonTypeCustom];
+    self.startStopButton.frame = CGRectMake(16, 252, cw - 32, 48);
+    self.startStopButton.layer.cornerRadius = 12;
+    [self.startStopButton setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
+    self.startStopButton.titleLabel.font = [UIFont systemFontOfSize:15.5 weight:UIFontWeightBold];
+    [self.startStopButton addTarget:self action:@selector(onStartStopTapped) forControlEvents:UIControlEventTouchUpInside];
+    [self.cardView addSubview:self.startStopButton];
+
+    UILabel *hintLbl = [[UILabel alloc] initWithFrame:CGRectMake(16, 306, cw - 32, 18)];
+    hintLbl.text = @"Mẹo: Bấm lại nút để Dừng khẩn cấp bất kỳ lúc nào";
+    hintLbl.textAlignment = NSTextAlignmentCenter;
+    hintLbl.textColor = [UIColor colorWithRed:0.612 green:0.639 blue:0.686 alpha:1.0];
+    hintLbl.font = [UIFont systemFontOfSize:11.5 weight:UIFontWeightMedium];
+    [self.cardView addSubview:hintLbl];
+
+    [self refreshSelectionUI];
+    self.statusTimer = [NSTimer scheduledTimerWithTimeInterval:0.2 target:self selector:@selector(refreshSelectionUI) userInfo:nil repeats:YES];
+}
+
+- (void)viewWillDisappear:(BOOL)animated
+{
+    [super viewWillDisappear:animated];
+    [self.statusTimer invalidate];
+    self.statusTimer = nil;
+}
+
+- (void)onBackdropTap:(UITapGestureRecognizer *)g
+{
+    CGPoint pt = [g locationInView:self.view];
+    if (!CGRectContainsPoint(self.cardView.frame, pt)) {
+        [self.view endEditing:YES];
+    }
+}
+
+- (BOOL)textFieldShouldReturn:(UITextField *)textField
+{
+    [textField resignFirstResponder];
+    return YES;
+}
+
+- (void)onCountPresetTapped:(UIButton *)sender
+{
+    self.selectedCount = sender.tag;
+    self.countField.text = [NSString stringWithFormat:@"%ld", (long)self.selectedCount];
+    [self refreshSelectionUI];
+}
+
+- (void)onCustomCountEdited:(UITextField *)tf
+{
+    NSInteger v = [tf.text integerValue];
+    if (v > 0) self.selectedCount = MIN(500, v);
+    [self refreshSelectionUI];
+}
+
+- (void)onSpeedPresetTapped:(UIButton *)sender
+{
+    self.selectedDelay = sender.tag / 1000.0;
+    [self refreshSelectionUI];
+}
+
+- (void)refreshSelectionUI
+{
+    UIColor *red = [UIColor colorWithRed:0.898 green:0.224 blue:0.208 alpha:1.0];
+    UIColor *dark = [UIColor colorWithRed:0.051 green:0.059 blue:0.071 alpha:1.0];
+    UIColor *border = [UIColor colorWithRed:0.165 green:0.184 blue:0.227 alpha:1.0];
+
+    for (UIButton *b in self.countButtons) {
+        BOOL sel = (b.tag == self.selectedCount);
+        b.backgroundColor = sel ? red : dark;
+        b.layer.borderColor = (sel ? red : border).CGColor;
+    }
+    NSInteger curMs = (NSInteger)round(self.selectedDelay * 1000.0);
+    for (UIButton *b in self.speedButtons) {
+        BOOL sel = (b.tag == curMs);
+        b.backgroundColor = sel ? red : dark;
+        b.layer.borderColor = (sel ? red : border).CGColor;
+    }
+
+    if ([ZXHookEngine isSpamRunning]) {
+        self.startStopButton.backgroundColor = [UIColor colorWithRed:0.95 green:0.35 blue:0.15 alpha:1.0];
+        NSString *t = [NSString stringWithFormat:@"⏹ Dừng khẩn cấp (Đang gửi %ld/%ld)",
+                       (long)[ZXHookEngine spamSentCount], (long)[ZXHookEngine spamTotalCount]];
+        [self.startStopButton setTitle:t forState:UIControlStateNormal];
+    } else {
+        self.startStopButton.backgroundColor = red;
+        [self.startStopButton setTitle:@"🚀 Bắt đầu gửi" forState:UIControlStateNormal];
+    }
+}
+
+- (void)onStartStopTapped
+{
+    if ([ZXHookEngine isSpamRunning]) {
+        [ZXHookEngine stopSpamNow];
+        [self refreshSelectionUI];
+        return;
+    }
+    NSString *msg = [self.messageField.text ?: @"" stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    NSInteger cnt = [self.countField.text integerValue];
+    if (cnt <= 0) cnt = self.selectedCount > 0 ? self.selectedCount : 5;
+    if (msg.length == 0) {
+        self.messageField.layer.borderColor = [UIColor colorWithRed:0.95 green:0.26 blue:0.21 alpha:1.0].CGColor;
+        return;
+    }
+    gLastSpamText = msg;
+
+    // Dismiss popup (and any ZX* settings modal underneath) so the active Zalo chat screen is front-and-center!
+    UIViewController *presenting = self.presentingViewController;
+    [self dismissViewControllerAnimated:YES completion:^{
+        NSString *pClass = NSStringFromClass([presenting class]);
+        if ([pClass hasPrefix:@"ZX"] || ([presenting isKindOfClass:[UINavigationController class]] &&
+            [NSStringFromClass([((UINavigationController *)presenting).viewControllers.firstObject class]) hasPrefix:@"ZX"])) {
+            [presenting dismissViewControllerAnimated:YES completion:^{
+                [ZXHookEngine startSpamWithText:msg count:cnt delay:self.selectedDelay];
+            }];
+        } else {
+            [ZXHookEngine startSpamWithText:msg count:cnt delay:self.selectedDelay];
+        }
+    }];
+}
+
+- (void)closePopup
+{
+    [self dismissViewControllerAnimated:YES completion:nil];
+}
+
+@end
+
+// ---- Runtime Helper for Keyboard Mini Spam Button, Chat Lock, Cell Menu ---
 
 @interface ZXUIRuntimeHelper : NSObject
 + (void)onRepeatButtonTapped:(UIButton *)sender;
 + (void)onUnlockButtonTapped:(UIButton *)sender;
 + (void)onCellLongPress:(UILongPressGestureRecognizer *)g;
++ (void)onKeyboardWillShow:(NSNotification *)n;
++ (void)onKeyboardWillHide:(NSNotification *)n;
 @end
 
 @implementation ZXUIRuntimeHelper
@@ -307,7 +814,80 @@ static void ZXSendSingleTextInChat(UIViewController *chatVC, NSString *text)
 + (void)onRepeatButtonTapped:(UIButton *)sender
 {
     (void)sender;
+    if ([ZXHookEngine isSpamRunning]) {
+        [ZXHookEngine stopSpamNow];
+        if (gKeyboardSpamButton) {
+            [gKeyboardSpamButton setTitle:@"↻ xN" forState:UIControlStateNormal];
+        }
+        return;
+    }
     [ZXHookEngine presentRepeaterDialogFromVC:ZXTopPresentedVC()];
+}
+
++ (void)onKeyboardWillShow:(NSNotification *)n
+{
+    if (![ZXConfig boolForKey:ZXK_MSG_REPEATER]) {
+        if (gKeyboardSpamButton) gKeyboardSpamButton.hidden = YES;
+        return;
+    }
+    UIViewController *top = ZXTopPresentedVC();
+    NSString *topCls = NSStringFromClass([top class]);
+    if ([topCls hasPrefix:@"ZX"] || [top isKindOfClass:[UIAlertController class]]) {
+        if (gKeyboardSpamButton) gKeyboardSpamButton.hidden = YES;
+        return;
+    }
+    if ([top isKindOfClass:[UINavigationController class]]) {
+        UIViewController *vis = ((UINavigationController *)top).visibleViewController;
+        if ([NSStringFromClass([vis class]) hasPrefix:@"ZX"]) {
+            if (gKeyboardSpamButton) gKeyboardSpamButton.hidden = YES;
+            return;
+        }
+        if (vis) gActiveChatVC = vis;
+    } else if (top) {
+        gActiveChatVC = top;
+    }
+
+    UIWindow *win = ZXActiveWindow();
+    if (!win) return;
+    ZXFindChatInputTextView(win);
+
+    CGRect kbEnd = [n.userInfo[UIKeyboardFrameEndUserInfoKey] CGRectValue];
+    if (kbEnd.size.height < 100) return;
+
+    if (!gKeyboardSpamButton) {
+        UIButton *b = [UIButton buttonWithType:UIButtonTypeCustom];
+        b.backgroundColor = [UIColor colorWithRed:0.898 green:0.224 blue:0.208 alpha:0.96]; // #E53935
+        b.layer.cornerRadius = 17.0;
+        b.layer.borderWidth = 1.5;
+        b.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.35].CGColor;
+        b.layer.shadowColor = UIColor.blackColor.CGColor;
+        b.layer.shadowOpacity = 0.35;
+        b.layer.shadowRadius = 5;
+        b.layer.shadowOffset = CGSizeMake(0, 2);
+        [b setTitle:@"↻ xN" forState:UIControlStateNormal];
+        [b setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
+        b.titleLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightHeavy];
+        [b addTarget:[ZXUIRuntimeHelper class] action:@selector(onRepeatButtonTapped:) forControlEvents:UIControlEventTouchUpInside];
+        gKeyboardSpamButton = b;
+    }
+
+    if (gKeyboardSpamButton.superview != win) {
+        [win addSubview:gKeyboardSpamButton];
+    }
+    CGFloat btnW = 64.0, btnH = 34.0;
+    CGFloat targetY = MAX(80.0, kbEnd.origin.y - btnH - 54.0);
+    gKeyboardSpamButton.frame = CGRectMake(win.bounds.size.width - btnW - 12.0, targetY, btnW, btnH);
+    [gKeyboardSpamButton setTitle:([ZXHookEngine isSpamRunning] ? @"⏹ Dừng" : @"↻ xN") forState:UIControlStateNormal];
+    gKeyboardSpamButton.hidden = NO;
+    [win bringSubviewToFront:gKeyboardSpamButton];
+}
+
++ (void)onKeyboardWillHide:(NSNotification *)n
+{
+    (void)n;
+    if (gKeyboardSpamButton && ![ZXHookEngine isSpamRunning]) {
+        gKeyboardSpamButton.hidden = YES;
+    }
 }
 
 + (void)onUnlockButtonTapped:(UIButton *)sender
@@ -333,7 +913,6 @@ static void ZXSendSingleTextInChat(UIViewController *chatVC, NSString *text)
             });
         }];
     } else {
-        // Fallback to 4-digit PIN prompt
         UIViewController *top = ZXTopPresentedVC();
         UIAlertController *a = [UIAlertController alertControllerWithTitle:@"Nhập mã PIN khóa chat"
                                                                    message:@"Nhập mã PIN 4 số dự phòng của bạn"
@@ -364,7 +943,6 @@ static void ZXSendSingleTextInChat(UIViewController *chatVC, NSString *text)
     UIView *cell = g.view;
     if (!cell) return;
 
-    // Extract title or ID from the cell
     NSMutableArray<NSString *> *texts = [NSMutableArray new];
     for (UIView *sub in cell.subviews) {
         if ([sub isKindOfClass:[UILabel class]] && [(UILabel *)sub text].length)
@@ -424,7 +1002,7 @@ static void ZXSendSingleTextInChat(UIViewController *chatVC, NSString *text)
 
 static void ZXAttachLockShieldIfNeeded(UIViewController *vc)
 {
-    if (!vc || ![ZXConfig boolForKey:ZXK_CHAT_LOCK_ENABLED]) return;
+    if (!vc) return;
     NSString *clsName = NSStringFromClass([vc class]);
     if ([clsName hasPrefix:@"ZX"] || [clsName hasPrefix:@"UI"] || [clsName hasPrefix:@"_"]) return;
     BOOL looksLikeChat = ([clsName rangeOfString:@"Chat" options:NSCaseInsensitiveSearch].location != NSNotFound ||
@@ -433,6 +1011,9 @@ static void ZXAttachLockShieldIfNeeded(UIViewController *vc)
     if (!looksLikeChat) return;
 
     gActiveChatVC = vc;
+    ZXFindChatInputTextView(vc.view);
+    if (![ZXConfig boolForKey:ZXK_CHAT_LOCK_ENABLED]) return;
+
     NSString *chatTitle = vc.navigationItem.title ?: vc.title ?: @"";
     NSString *threadId = ZXReadStringKVC(vc, @[@"threadId", @"chatId", @"targetUserId", @"conversationId", @"userId"]);
     NSString *matchKey = nil;
@@ -476,37 +1057,7 @@ static void ZXAttachLockShieldIfNeeded(UIViewController *vc)
     [ZXUIRuntimeHelper onUnlockButtonTapped:btn];
 }
 
-static void ZXAttachRepeaterButtonIfNeeded(UIViewController *vc)
-{
-    if (!vc || ![ZXConfig boolForKey:ZXK_MSG_REPEATER]) return;
-    NSString *clsName = NSStringFromClass([vc class]);
-    if ([clsName hasPrefix:@"ZX"] || [clsName hasPrefix:@"UI"]) return;
-    UITextView *tv = ZXFindChatInputTextView(vc.view);
-    if (!tv) return;
-    gActiveChatVC = vc;
-
-    UIView *bar = tv.superview ?: vc.view;
-    if ([bar viewWithTag:0x4E545250]) return;
-
-    UIButton *repBtn = [UIButton buttonWithType:UIButtonTypeCustom];
-    repBtn.tag = 0x4E545250;
-    repBtn.frame = CGRectMake(MAX(4, bar.bounds.size.width - 78), MAX(4, (bar.bounds.size.height - 32) / 2.0), 32, 32);
-    repBtn.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin | UIViewAutoresizingFlexibleTopMargin | UIViewAutoresizingFlexibleBottomMargin;
-    repBtn.backgroundColor = [UIColor colorWithRed:0.898 green:0.224 blue:0.208 alpha:0.95];
-    repBtn.layer.cornerRadius = 16;
-    if (@available(iOS 13.0, *)) {
-        UIImageSymbolConfiguration *cfg = [UIImageSymbolConfiguration configurationWithPointSize:14 weight:UIImageSymbolWeightBold];
-        UIImage *im = [[UIImage systemImageNamed:@"repeat" withConfiguration:cfg] imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
-        [repBtn setImage:im forState:UIControlStateNormal];
-    } else {
-        [repBtn setTitle:@"↻" forState:UIControlStateNormal];
-    }
-    repBtn.tintColor = UIColor.whiteColor;
-    [repBtn addTarget:[ZXUIRuntimeHelper class] action:@selector(onRepeatButtonTapped:) forControlEvents:UIControlEventTouchUpInside];
-    [bar addSubview:repBtn];
-}
-
-// ---- Dynamic runtime hooks for all 6 new features -------------------------
+// ---- Dynamic runtime hooks for all extended features ----------------------
 
 static void ZXInstallExtendedFeatureHooks(void)
 {
@@ -514,7 +1065,21 @@ static void ZXInstallExtendedFeatureHooks(void)
     dispatch_once(&onceToken, ^{
         ZXInitHiddenChatsStore();
 
-        // 1. Hook UIViewController -viewDidAppear: for Chat Lock & Message Repeater button attachment
+        // Register Keyboard Notifications for Mini Floating Spam Button
+        [[NSNotificationCenter defaultCenter] addObserver:[ZXUIRuntimeHelper class]
+                                                 selector:@selector(onKeyboardWillShow:)
+                                                     name:UIKeyboardWillShowNotification
+                                                   object:nil];
+        [[NSNotificationCenter defaultCenter] addObserver:[ZXUIRuntimeHelper class]
+                                                 selector:@selector(onKeyboardWillShow:)
+                                                     name:UIKeyboardWillChangeFrameNotification
+                                                   object:nil];
+        [[NSNotificationCenter defaultCenter] addObserver:[ZXUIRuntimeHelper class]
+                                                 selector:@selector(onKeyboardWillHide:)
+                                                     name:UIKeyboardWillHideNotification
+                                                   object:nil];
+
+        // 1. Hook UIViewController -viewDidAppear: for Chat Lock & tracking active chat VC
         Method vda = class_getInstanceMethod([UIViewController class], @selector(viewDidAppear:));
         if (vda) {
             IMP origVDA = method_getImplementation(vda);
@@ -522,12 +1087,11 @@ static void ZXInstallExtendedFeatureHooks(void)
                 ((void (*)(id, SEL, BOOL))origVDA)(self_, @selector(viewDidAppear:), animated);
                 @try {
                     ZXAttachLockShieldIfNeeded(self_);
-                    ZXAttachRepeaterButtonIfNeeded(self_);
                 } @catch (__unused NSException *e) {}
             }));
         }
 
-        // 2. Hook UITableViewCell -didMoveToWindow for long-press quick lock & voice message menu
+        // 2. Hook UITableViewCell -didMoveToWindow for long-press quick lock & hidden chat model introspection
         Method dmw = class_getInstanceMethod([UITableViewCell class], @selector(didMoveToWindow));
         if (dmw) {
             IMP origDMW = method_getImplementation(dmw);
@@ -536,6 +1100,9 @@ static void ZXInstallExtendedFeatureHooks(void)
                 if (!self_.window) return;
                 NSString *cn = NSStringFromClass([self_ class]);
                 if ([cn hasPrefix:@"ZX"]) return;
+                @try {
+                    ZXScanObjectIvarsForChats(self_);
+                } @catch (__unused NSException *e) {}
                 static const char kLPKey;
                 if (!objc_getAssociatedObject(self_, &kLPKey)) {
                     UILongPressGestureRecognizer *lp = [[UILongPressGestureRecognizer alloc] initWithTarget:[ZXUIRuntimeHelper class] action:@selector(onCellLongPress:)];
@@ -580,7 +1147,7 @@ static void ZXInstallExtendedFeatureHooks(void)
             IMP origCat = method_getImplementation(avCat);
             method_setImplementation(avCat, imp_implementationWithBlock(^BOOL(AVAudioSession *self_, AVAudioSessionCategory cat, AVAudioSessionMode mode, AVAudioSessionCategoryOptions opts, NSError **err) {
                 BOOL ok = ((BOOL (*)(id, SEL, AVAudioSessionCategory, AVAudioSessionMode, AVAudioSessionCategoryOptions, NSError **))origCat)(self_, @selector(setCategory:mode:options:error:), cat, mode, opts, err);
-                if ([cat isEqualToString:AVAudioSessionCategoryPlayAndRecord] && [ mode isEqualToString:AVAudioSessionModeVoiceChat]) {
+                if ([cat isEqualToString:AVAudioSessionCategoryPlayAndRecord] && [mode isEqualToString:AVAudioSessionModeVoiceChat]) {
                     ZXStartCallRecordingIfNeeded();
                 } else if ([cat isEqualToString:AVAudioSessionCategorySoloAmbient] || [cat isEqualToString:AVAudioSessionCategoryAmbient]) {
                     ZXStopCallRecordingIfActive();
@@ -589,7 +1156,7 @@ static void ZXInstallExtendedFeatureHooks(void)
             }));
         }
 
-        // 5. Scan app classes for Hidden Chats, Story Seen, and WebRTC Force Relay
+        // 5. Scan app classes for Hidden Chats getters/filters, Story Seen, and WebRTC Force Relay
         NSString *appPath = [[NSBundle mainBundle] bundlePath];
         unsigned count = 0;
         Class *classes = objc_copyClassList(&count);
@@ -597,6 +1164,10 @@ static void ZXInstallExtendedFeatureHooks(void)
             Class c = classes[i];
             const char *img = class_getImageName(c);
             if (!img || strncmp(img, appPath.UTF8String, appPath.length) != 0) continue;
+            NSString *cname = NSStringFromClass(c);
+            NSString *lc = cname.lowercaseString;
+            if ([lc hasPrefix:@"ui"] || [lc hasPrefix:@"zx"]) continue;
+
             unsigned mc = 0;
             Method *ms = class_copyMethodList(c, &mc);
             for (unsigned j = 0; j < mc; j++) {
@@ -605,21 +1176,23 @@ static void ZXInstallExtendedFeatureHooks(void)
                 NSString *lower = sn.lowercaseString;
                 unsigned argc = method_getNumberOfArguments(ms[j]);
 
-                // Hidden chats check: isHiddenChat / isHiddenConversation / isHiddenThread
-                if (argc == 2 && ([lower isEqualToString:@"ishiddenchat"] ||
-                                  [lower isEqualToString:@"ishiddenconversation"] ||
-                                  [lower isEqualToString:@"ishiddenthread"] ||
-                                  [lower isEqualToString:@"ishideconversation"])) {
+                // Hidden chats check on any model/manager class
+                if (argc == 2 && ZXNameIsHiddenFlag(lower)) {
                     char *rt = method_copyReturnType(ms[j]);
-                    BOOL isBool = rt && (rt[0] == 'B' || rt[0] == 'c');
+                    char rc = rt ? rt[0] : '?';
                     if (rt) free(rt);
-                    if (isBool) {
+                    if (rc == 'B' || rc == 'c' || rc == 'i' || rc == 'q' || rc == 'I' || rc == 'Q') {
                         IMP origH = method_getImplementation(ms[j]);
-                        method_setImplementation(ms[j], imp_implementationWithBlock(^BOOL(id self_) {
-                            BOOL realHidden = ((BOOL (*)(id, SEL))origH)(self_, s);
-                            if (realHidden) ZXRecordHiddenConversationObject(self_);
-                            if ([ZXConfig boolForKey:ZXK_UNHIDE_CHATS]) return NO;
-                            return realHidden;
+                        method_setImplementation(ms[j], imp_implementationWithBlock(^ZXWord(id self_) {
+                            ZXWord realVal = ((ZXWord (*)(id, SEL))origH)(self_, s);
+                            if (realVal != 0) {
+                                ZXRecordHiddenConversationObject(self_);
+                                if ([ZXConfig boolForKey:ZXK_UNHIDE_CHATS]) {
+                                    ZXInspectAndUnhideObject(self_, YES);
+                                    return 0;
+                                }
+                            }
+                            return realVal;
                         }));
                     }
                 }
@@ -636,7 +1209,7 @@ static void ZXInstallExtendedFeatureHooks(void)
                         IMP origS = method_getImplementation(ms[j]);
                         method_setImplementation(ms[j], imp_implementationWithBlock(^(id self_, ZXWord a1, ZXWord a2) {
                             if ([ZXConfig boolForKey:ZXK_GHOST_STORY]) {
-                                ZXLog(@"NTHE blocked story seen: -[%@ %@]", NSStringFromClass([self_ class]), sn);
+                                ZXLog(@"thanhthe blocked story seen: -[%@ %@]", NSStringFromClass([self_ class]), sn);
                                 return;
                             }
                             ((void (*)(id, SEL, ZXWord, ZXWord))origS)(self_, s, a1, a2);
@@ -660,7 +1233,7 @@ static void ZXInstallExtendedFeatureHooks(void)
                                     }
                                 } @catch (__unused NSException *e) {}
                                 if ([sdp containsString:@"typ host"] || [sdp containsString:@"typ srflx"]) {
-                                    ZXLog(@"NTHE Call Force Relay blocked non-relay ICE candidate");
+                                    ZXLog(@"thanhthe Call Force Relay blocked non-relay ICE candidate");
                                     return;
                                 }
                             }
@@ -1165,11 +1738,34 @@ static BOOL ZXWordArgType(char c)
     return YES;
 }
 
-// ---- Extended NTHE Public API ---------------------------------------------
+// ---- Extended Public API --------------------------------------------------
+
++ (void)scanMemoryForHiddenChats
+{
+    ZXInitHiddenChatsStore();
+    for (UIWindow *w in UIApplication.sharedApplication.windows) {
+        if (w.windowLevel >= UIWindowLevelAlert) continue;
+        ZXScanViewHierarchyForChats(w);
+    }
+    // Also inspect singleton data managers (ChatDataManager, InboxDataManager, ConversationManager)
+    for (NSString *clsName in @[@"ChatDataManager", @"InboxDataManager", @"ConversationDataManager", @"ThreadDataManager", @"ZaloDataManager"]) {
+        Class c = NSClassFromString(clsName);
+        if (!c) continue;
+        for (NSString *singletonSel in @[@"sharedInstance", @"sharedManager", @"defaultManager", @"instance", @"shared"]) {
+            SEL s = NSSelectorFromString(singletonSel);
+            if ([c respondsToSelector:s]) {
+                @try {
+                    id mgr = ((id (*)(id, SEL))[c methodForSelector:s])(c, s);
+                    if (mgr) ZXScanObjectIvarsForChats(mgr);
+                } @catch (__unused NSException *e) {}
+            }
+        }
+    }
+}
 
 + (NSArray<NSDictionary *> *)discoveredHiddenChats
 {
-    ZXInitHiddenChatsStore();
+    [self scanMemoryForHiddenChats];
     @synchronized (gHiddenChatsMap) {
         return gHiddenChatsMap.allValues ?: @[];
     }
@@ -1184,6 +1780,7 @@ static BOOL ZXWordArgType(char c)
         ZXSaveHiddenChatsStore();
     }
     [ZXConfig setBool:YES forKey:ZXK_UNHIDE_CHATS];
+    [self scanMemoryForHiddenChats];
     return YES;
 }
 
@@ -1220,53 +1817,72 @@ static BOOL ZXWordArgType(char c)
     }
 }
 
++ (BOOL)isSpamRunning
+{
+    return gSpamRunning;
+}
+
++ (NSInteger)spamSentCount
+{
+    return gSpamSentCount;
+}
+
++ (NSInteger)spamTotalCount
+{
+    return gSpamTotalCount;
+}
+
++ (void)stopSpamNow
+{
+    gSpamGeneration++;
+    gSpamRunning = NO;
+    if (gKeyboardSpamButton) {
+        [gKeyboardSpamButton setTitle:@"↻ xN" forState:UIControlStateNormal];
+    }
+}
+
++ (void)startSpamWithText:(NSString *)text count:(NSInteger)count delay:(double)delay
+{
+    if (text.length == 0 || count <= 0) return;
+    gSpamGeneration++;
+    NSInteger myGen = gSpamGeneration;
+    gSpamRunning = YES;
+    gSpamSentCount = 0;
+    gSpamTotalCount = MIN(500, count);
+    double interval = MAX(0.1, delay);
+
+    if (gKeyboardSpamButton) {
+        gKeyboardSpamButton.hidden = NO;
+        [gKeyboardSpamButton setTitle:@"⏹ Dừng" forState:UIControlStateNormal];
+    }
+
+    UIViewController *targetChat = gActiveChatVC;
+    for (NSInteger i = 0; i < gSpamTotalCount; i++) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(i * interval * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            if (!gSpamRunning || gSpamGeneration != myGen) return;
+            ZXSendSingleTextInChat(targetChat, text);
+            gSpamSentCount = i + 1;
+            if (gKeyboardSpamButton) {
+                [gKeyboardSpamButton setTitle:[NSString stringWithFormat:@"⏹ %ld/%ld", (long)gSpamSentCount, (long)gSpamTotalCount] forState:UIControlStateNormal];
+            }
+            if (gSpamSentCount >= gSpamTotalCount) {
+                gSpamRunning = NO;
+                if (gKeyboardSpamButton) {
+                    [gKeyboardSpamButton setTitle:@"↻ xN" forState:UIControlStateNormal];
+                }
+            }
+        });
+    }
+}
+
 + (void)presentRepeaterDialogFromVC:(UIViewController *)vc
 {
     UIViewController *host = vc ?: ZXTopPresentedVC();
     if (!host) return;
-
-    UIAlertController *a = [UIAlertController alertControllerWithTitle:@"Gửi tin nhắn lặp lại"
-                                                               message:@"Nhập nội dung, số lần gửi và độ trễ (giây) giữa mỗi lần gửi"
-                                                        preferredStyle:UIAlertControllerStyleAlert];
-    if (@available(iOS 13.0, *)) a.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
-
-    UITextView *chatTV = ZXFindChatInputTextView(gActiveChatVC.view ?: ZXActiveWindow());
-    NSString *prefill = chatTV.text ?: @"";
-
-    [a addTextFieldWithConfigurationHandler:^(UITextField *tf) {
-        tf.placeholder = @"Nội dung tin nhắn...";
-        tf.text = prefill;
-    }];
-    [a addTextFieldWithConfigurationHandler:^(UITextField *tf) {
-        tf.placeholder = @"Số lần gửi (mặc định: 5)";
-        tf.text = @"5";
-        tf.keyboardType = UIKeyboardTypeNumberPad;
-    }];
-    [a addTextFieldWithConfigurationHandler:^(UITextField *tf) {
-        tf.placeholder = @"Độ trễ (giây, mặc định: 0.5)";
-        tf.text = @"0.5";
-        tf.keyboardType = UIKeyboardTypeDecimalPad;
-    }];
-
-    [a addAction:[UIAlertAction actionWithTitle:@"Hủy" style:UIAlertActionStyleCancel handler:nil]];
-    [a addAction:[UIAlertAction actionWithTitle:@"Bắt đầu gửi" style:UIAlertActionStyleDefault handler:^(UIAlertAction *act) {
-        (void)act;
-        NSString *msg = a.textFields.count > 0 ? (a.textFields[0].text ?: @"") : @"";
-        NSInteger count = a.textFields.count > 1 ? [a.textFields[1].text integerValue] : 5;
-        double delay = a.textFields.count > 2 ? [a.textFields[2].text doubleValue] : 0.5;
-        if (count <= 0) count = 5;
-        if (count > 200) count = 200;
-        if (delay < 0.05) delay = 0.5;
-        if (msg.length == 0) return;
-
-        UIViewController *targetChat = gActiveChatVC;
-        for (NSInteger i = 0; i < count; i++) {
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(i * delay * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                ZXSendSingleTextInChat(targetChat, msg);
-            });
-        }
-    }]];
-    [host presentViewController:a animated:YES completion:nil];
+    ZXSpamPopupViewController *popup = [ZXSpamPopupViewController new];
+    popup.modalPresentationStyle = UIModalPresentationOverFullScreen;
+    popup.modalTransitionStyle = UIModalTransitionStyleCrossDissolve;
+    [host presentViewController:popup animated:YES completion:nil];
 }
 
 @end

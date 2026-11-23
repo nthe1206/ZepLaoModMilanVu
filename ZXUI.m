@@ -19,6 +19,14 @@ static UIColor *ZXColorTextSub(void)     { return [UIColor colorWithRed:0.612 gr
 static UIColor *ZXColorZaloRed(void)     { return [UIColor colorWithRed:0.898 green:0.224 blue:0.208 alpha:1.0]; } // #E53935
 static UIColor *ZXColorNavTint(void)     { return [UIColor colorWithRed:0.950 green:0.260 blue:0.210 alpha:1.0]; } // High-contrast red
 
+static UIColor *ZXColorFromHex(NSUInteger hex, CGFloat alpha)
+{
+    CGFloat r = ((hex >> 16) & 0xFF) / 255.0;
+    CGFloat g = ((hex >> 8) & 0xFF) / 255.0;
+    CGFloat b = (hex & 0xFF) / 255.0;
+    return [UIColor colorWithRed:r green:g blue:b alpha:alpha];
+}
+
 static UIWindow *ZXKeyWindow(void)
 {
     if (@available(iOS 13.0, *)) {
@@ -370,6 +378,7 @@ static void ZXHookBubbleShow(void)
     self.title = @"Trò chuyện đang ẩn";
     self.tableView.backgroundColor = ZXColorBgPrimary();
     self.tableView.separatorColor = ZXColorCardBorder();
+    self.navigationItem.rightBarButtonItem = ZXMakeNavButton(@"arrow.clockwise.circle.fill", @"Quét lại", ZXColorZaloRed(), self, @selector(reloadChats));
     [self reloadChats];
 }
 - (void)viewWillAppear:(BOOL)animated
@@ -379,6 +388,7 @@ static void ZXHookBubbleShow(void)
 }
 - (void)reloadChats
 {
+    [ZXHookEngine scanMemoryForHiddenChats];
     self.chats = [ZXHookEngine discoveredHiddenChats] ?: @[];
     [self.tableView reloadData];
 }
@@ -402,7 +412,7 @@ static void ZXHookBubbleShow(void)
     }
     if (self.chats.count == 0) {
         cell.textLabel.text = @"Chưa phát hiện cuộc trò chuyện ẩn nào";
-        cell.detailTextLabel.text = @"Hãy bật 'Tạm hiện tất cả chat bị ẩn' và cuộn danh sách tin nhắn Zalo để tự động thu thập.";
+        cell.detailTextLabel.text = @"Hãy bật 'Tạm hiện tất cả chat bị ẩn', cuộn danh sách chat Zalo rồi bấm 'Quét lại'.";
         cell.accessoryType = UITableViewCellAccessoryNone;
         return cell;
     }
@@ -649,83 +659,264 @@ static void ZXNoteTabBarInteraction(UIView *bar);
 static BOOL ZXReduceMotion(void) { return UIAccessibilityIsReduceMotionEnabled(); }
 static BOOL ZXReduceTransparency(void) { return UIAccessibilityIsReduceTransparencyEnabled(); }
 
-// ---------------------------------------------------------------- settings catalog
+// ---------------------------------------------------------------- 5 Category Cards Catalog
 
-static NSArray<NSDictionary *> *ZXAllSections(void)
+static NSArray<NSDictionary *> *ZXFiveCategories(void)
 {
     return @[
-        @{ @"title": @"GIAO DIỆN & NÚT NỔI", @"icon": @"paintbrush.fill", @"color": @(0xE53935), @"items": @[
-            @{ @"action": @"picklogo", @"title": @"Đổi ảnh nút nổi từ Thư viện", @"sub": @"Cắt tròn tự động, lưu vào Documents/nthe_custom_logo.png", @"icon": @"photo.circle.fill", @"color": @(0xE53935), @"kw": @"logo anh nut noi thu vien custom" },
-            @{ @"action": @"resetlogo", @"title": @"Khôi phục Logo Zalo Đỏ mặc định", @"sub": @"Dùng biểu tượng Zalo nền đỏ #E53935 vẽ bằng CoreGraphics", @"icon": @"arrow.counterclockwise.circle.fill", @"color": @(0xF97316), @"kw": @"khoi phuc mac dinh zalo do" },
-            @{ @"type": @"slider", @"title": @"Kích thước nút nổi", @"sub": @"Kéo để chỉnh độ lớn nút nổi ngay lập tức", @"icon": @"arrow.up.left.and.arrow.down.right.circle.fill", @"color": @(0xEF4444), @"kw": @"kich thuoc size nut noi slider" },
-            @{ @"key": ZXK_FLOATING_TABBAR, @"title": @"Thanh tab nổi bo tròn (thử nghiệm)", @"sub": @"Biến thanh Tin nhắn/Danh bạ dưới cùng thành thanh nổi hiện đại", @"icon": @"dock.rectangle", @"color": @(0x8B5CF6), @"kw": @"tabbar floating thanh tab noi" },
-            @{ @"action": @"tabbaridle", @"title": @"Thời gian tự thu gọn thanh tab (giây)", @"sub": @"Không chạm vào bao lâu thì tự co lại thành nút tròn (0 = tắt)", @"icon": @"timer", @"color": @(0x6366F1), @"kw": @"tabbar idle thu gon giay" },
-        ]},
-        @{ @"title": @"QUYỀN RIÊNG TƯ & BẢO MẬT CHAT", @"icon": @"eye.slash.fill", @"color": @(0x3B82F6), @"items": @[
-            @{ @"key": ZXK_BLOCK_SEEN, @"title": @"Chặn trạng thái \"Đã xem\"", @"sub": @"Người gửi không biết bạn đã đọc tin nhắn", @"icon": @"eye.slash.fill", @"color": @(0x3B82F6), @"kw": @"seen ghost da xem doc" },
-            @{ @"key": ZXK_SILENT_TYPING, @"title": @"Ẩn trạng thái \"Đang nhập\"", @"sub": @"Người nhận không thấy bạn đang soạn tin", @"icon": @"keyboard.fill", @"color": @(0x0EA5E9), @"kw": @"typing dang nhap soan go" },
-            @{ @"key": ZXK_GHOST_STORY, @"title": @"Xem Khoảnh khắc (Story) ẩn danh", @"sub": @"Chặn gửi gói tin xác nhận đã xem Story/Khoảnh khắc lên server", @"icon": @"sparkles.tv.fill", @"color": @(0x8B5CF6), @"kw": @"story khoanh khac an danh seen" },
-            @{ @"key": ZXK_UNHIDE_CHATS, @"title": @"Tạm hiện tất cả chat bị ẩn", @"sub": @"Hook isHiddenChat/filterHidden trả về NO để hiện lại trên danh sách chính", @"icon": @"eye.circle.fill", @"color": @(0x10B981), @"kw": @"tam hien chat an hidden conversation" },
-            @{ @"action": @"hidden_chats_list", @"title": @"Danh sách trò chuyện đang ẩn", @"sub": @"Xác thực Face ID / PIN để xem tên, UID, tin cuối và mở thẳng chat ẩn", @"icon": @"list.bullet.rectangle.portrait.fill", @"color": @(0x14B8A6), @"kw": @"danh sach tro chuyen dang an hidden list" },
-            @{ @"key": ZXK_CHAT_LOCK_ENABLED, @"title": @"Khóa phòng chat tự chọn (Face ID / PIN)", @"sub": @"Che mờ & yêu cầu Face ID / Mật khẩu khi mở phòng chat đã khóa", @"icon": @"lock.shield.fill", @"color": @(0xE53935), @"kw": @"khoa phong chat faceid pin lock" },
-            @{ @"action": @"set_lock_pin", @"title": @"Đặt / Đổi mã PIN dự phòng (4 số)", @"sub": @"Dùng để mở khóa chat và xem danh sách chat ẩn khi không dùng Face ID", @"icon": @"key.fill", @"color": @(0xF59E0B), @"kw": @"ma pin 4 so du phong" },
-            @{ @"action": @"locked_chats_list", @"title": @"Danh sách chat bị khóa", @"sub": @"Thêm/xóa phòng chat cần khóa (hoặc nhấn giữ hội thoại ở danh sách chat)", @"icon": @"lock.rectangle.stack.fill", @"color": @(0xEF4444), @"kw": @"danh sach chat bi khoa locked" },
-        ]},
-        @{ @"title": @"CÔNG CỤ CHAT", @"icon": @"bubble.left.and.bubble.right.fill", @"color": @(0xF97316), @"items": @[
-            @{ @"key": ZXK_MSG_REPEATER, @"title": @"Gửi tin nhắn lặp lại (Message Repeater)", @"sub": @"Hiện nút lặp lại cạnh nút Gửi trong khung chat kèm tùy chỉnh độ trễ", @"icon": @"repeat.circle.fill", @"color": @(0xE53935), @"kw": @"gui tin nhan lap lai repeater spam delay" },
-            @{ @"action": @"open_repeater", @"title": @"Mở bảng Gửi tin nhắn lặp lại ngay", @"sub": @"Nhập nội dung, số lần gửi (mặc định 5) và độ trễ giây (mặc định 0.5s)", @"icon": @"paperplane.circle.fill", @"color": @(0xF97316), @"kw": @"mo bang gui tin lap lai" },
-        ]},
-        @{ @"title": @"CUỘC GỌI & ÂM THANH", @"icon": @"phone.waves.left.and.right", @"color": @(0x06B6D4), @"items": @[
-            @{ @"key": ZXK_CALL_FORCE_RELAY, @"title": @"Bảo vệ IP cuộc gọi (Force Relay)", @"sub": @"Ép kết nối WebRTC/Zalo Call qua máy chủ Relay, chặn P2P/STUN lộ IP thật", @"icon": @"network.badge.shield.half.filled", @"color": @(0x06B6D4), @"kw": @"bao ve ip cuoc goi force relay webrtc stun p2p" },
-            @{ @"key": ZXK_AUTO_CALL_RECORD, @"title": @"Ghi âm cuộc gọi tự động (.m4a)", @"sub": @"Tự động ghi âm cuộc gọi thoại Zalo lưu vào Documents/NTHE_CallRecords/", @"icon": @"waveform.circle.fill", @"color": @(0xE53935), @"kw": @"ghi am cuoc goi tu dong call record m4a" },
-            @{ @"action": @"call_records_list", @"title": @"Danh sách bản ghi âm cuộc gọi", @"sub": @"Nghe lại, ghi âm thử hoặc chia sẻ các tệp .m4a đã lưu", @"icon": @"folder.fill.badge.waveform", @"color": @(0xF59E0B), @"kw": @"danh sach ban ghi am" },
-            @{ @"key": ZXK_VOICE_MSG_TOOLS, @"title": @"Tốc độ & Lưu tin nhắn thoại", @"sub": @"Cho phép phát tốc độ 1.0x/1.5x/2.0x và lưu tệp âm thanh gốc khi nhấn giữ", @"icon": @"speedometer", @"color": @(0x10B981), @"kw": @"toc do luu tin nhan thoai voice speed audio" },
-            @{ @"action": @"voice_speed_menu", @"title": @"Chỉnh tốc độ phát & Lưu thoại gần nhất", @"sub": @"Chọn nhanh 1.0x, 1.5x, 2.0x hoặc xuất file tin nhắn thoại vừa nghe", @"icon": @"slider.horizontal.below.waveform", @"color": @(0x14B8A6), @"kw": @"chinh toc do phat 1.5x 2.0x" },
-        ]},
-        @{ @"title": @"TIN THU HỒI & TIN XÓA", @"icon": @"arrow.uturn.backward.circle.fill", @"color": @(0x10B981), @"items": @[
-            @{ @"key": ZXK_ANTI_RECALL, @"title": @"Giữ tin bị thu hồi", @"sub": @"Tin vẫn hiển thị trong khung chat khi đối phương thu hồi", @"icon": @"shield.checkered", @"color": @(0x10B981), @"kw": @"anti recall chong thu hoi" },
-            @{ @"key": ZXK_SHOW_CONTENT, @"title": @"Hiện nội dung tin bị thu hồi/xóa", @"sub": @"Lưu tạm nội dung tin nhắn nhận được trên thiết bị", @"icon": @"text.bubble.fill", @"color": @(0x14B8A6), @"kw": @"noi dung thu hoi xoa" },
-            @{ @"key": ZXK_RECALL_NOTE, @"title": @"Nhãn \"đã thu hồi\" trên tin", @"sub": @"Hiện ghi chú nhỏ trong bong bóng tin nhắn được giữ lại", @"icon": @"tag.fill", @"color": @(0x059669), @"kw": @"nhan label da thu hoi" },
-            @{ @"key": ZXK_ANTI_RECALL_INCLUDE_ME, @"title": @"Áp dụng cả tin do mình thu hồi", @"sub": @"Giữ lại luôn tin nhắn do chính bạn thu hồi", @"icon": @"person.crop.circle.badge.checkmark", @"color": @(0x10B981), @"kw": @"minh thu hoi" },
-            @{ @"key": ZXK_ANTI_DELETE, @"title": @"Giữ tin bị xóa", @"sub": @"Ngăn xóa tin nhắn phía máy của bạn", @"icon": @"trash.slash.fill", @"color": @(0x22C55E), @"kw": @"anti delete chong xoa" },
-            @{ @"key": ZXK_ANTI_DELETE_INCLUDE_ME, @"title": @"Áp dụng cả tin do mình xóa", @"sub": @"Giữ lại luôn tin nhắn do chính bạn bấm xóa", @"icon": @"person.fill.checkmark", @"color": @(0x16A34A), @"kw": @"minh xoa" },
-            @{ @"action": @"history", @"title": @"Lịch sử tin bị thu hồi / xóa", @"sub": @"Xem danh sách toàn bộ tin nhắn đã bắt được", @"icon": @"clock.arrow.circlepath", @"color": @(0x0EA5E9), @"kw": @"lich su history" },
-            @{ @"action": @"clearmarks", @"title": @"Xóa danh sách tin đã đánh dấu", @"sub": @"Làm sạch các nhãn đã thu hồi trên khung chat", @"icon": @"sparkles", @"color": @(0xF59E0B), @"kw": @"xoa danh dau clear marks" },
-            @{ @"action": @"clearcache", @"title": @"Xóa bộ nhớ đệm tin nhắn", @"sub": @"Dọn dữ liệu tin nhắn lưu tạm trên máy", @"icon": @"internaldrive.fill", @"color": @(0xF97316), @"kw": @"xoa cache bo nho dem" },
-            @{ @"action": @"uid", @"title": @"User ID Zalo của bạn", @"sub": @"Dùng để phân biệt tin nhắn của bạn và người khác", @"icon": @"person.text.rectangle.fill", @"color": @(0x6366F1), @"kw": @"uid user id" },
-        ]},
-        @{ @"title": @"QUẢNG CÁO & THEO DÕI", @"icon": @"shield.lefthalf.filled", @"color": @(0xF59E0B), @"items": @[
-            @{ @"key": ZXK_BLOCK_ADS, @"title": @"Chặn quảng cáo Zalo", @"sub": @"Chặn kết nối tới các máy chủ phân phối quảng cáo", @"icon": @"hand.raised.fill", @"color": @(0xEF4444), @"kw": @"ads quang cao chan" },
-            @{ @"key": ZXK_DISABLE_TRACKING, @"title": @"Tắt theo dõi hành vi (Tracking)", @"sub": @"Không gửi dữ liệu phân tích thao tác về máy chủ", @"icon": @"location.slash.fill", @"color": @(0xF59E0B), @"kw": @"tracking theo doi" },
-            @{ @"key": ZXK_BLOCK_QOS, @"title": @"Chặn báo cáo chất lượng (QoS)", @"sub": @"Giảm lưu lượng ngầm gửi định kỳ của ứng dụng", @"icon": @"antenna.radiowaves.left.and.right.slash", @"color": @(0xEAB308), @"kw": @"qos log" },
-            @{ @"key": ZXK_DISABLE_FIREBASE, @"title": @"Tắt Firebase Analytics", @"sub": @"Vô hiệu hóa thu thập thống kê Firebase", @"icon": @"flame.fill", @"color": @(0xF97316), @"kw": @"firebase logging" },
-        ]},
-        @{ @"title": @"ẢNH, VIDEO, FILE & TỰ HỦY", @"icon": @"photo.on.rectangle.angled", @"color": @(0xEC4899), @"items": @[
-            @{ @"key": ZXK_DEFAULT_ORIGINAL, @"title": @"Gửi ảnh chất lượng gốc (Original)", @"sub": @"Tự động bật chế độ ảnh gốc khi chọn ảnh gửi đi", @"icon": @"photo.fill", @"color": @(0xEC4899), @"kw": @"hd original anh goc" },
-            @{ @"key": ZXK_VIDEO_ORIGINAL, @"title": @"Gửi video giữ nguyên gốc (thử nghiệm)", @"sub": @"Bỏ qua bước nén giảm chất lượng video khi gửi", @"icon": @"video.fill", @"color": @(0xD946EF), @"kw": @"video hd original" },
-            @{ @"key": ZXK_UNLIMITED_MEDIA, @"title": @"Mở khóa giới hạn dung lượng gửi", @"sub": @"Cho phép đính kèm file và media dung lượng lớn", @"icon": @"externaldrive.fill.badge.plus", @"color": @(0xA855F7), @"kw": @"file size dung luong" },
-            @{ @"key": ZXK_TTL_OVERRIDE, @"title": @"Bật thời gian tự hủy tin nhắn (TTL)", @"sub": @"Áp dụng thời gian tự hủy tùy chỉnh cho tin bạn gửi", @"icon": @"hourglass", @"color": @(0xF43F5E), @"kw": @"ttl tu huy" },
-            @{ @"action": @"ttl", @"title": @"Đặt giá trị TTL (mili-giây)", @"sub": @"Nhập số ms tin nhắn tự hủy (ví dụ: 60000 = 1 phút)", @"icon": @"slider.horizontal.3", @"color": @(0xEC4899), @"kw": @"ttl ms gia tri" },
-        ]},
-        @{ @"title": @"CÔNG CỤ NÂNG CAO", @"icon": @"wrench.and.screwdriver.fill", @"color": @(0x64748B), @"items": @[
-            @{ @"action": @"scan", @"title": @"Quét Class / Method Runtime", @"sub": @"Dò danh sách hàm nội bộ của Zalo để viết hook", @"icon": @"magnifyingglass.circle.fill", @"color": @(0x3B82F6), @"kw": @"scan quet class method" },
-            @{ @"action": @"viewscan", @"title": @"Xem & Chia sẻ kết quả quét", @"sub": @"Mở hoặc xuất tệp scan.txt", @"icon": @"square.and.arrow.up.fill", @"color": @(0x0EA5E9), @"kw": @"view scan chia se" },
-            @{ @"action": @"rules", @"title": @"Trình sửa rules.json", @"sub": @"Chỉnh sửa quy tắc hook trực tiếp trong ứng dụng", @"icon": @"curlybraces.square.fill", @"color": @(0x10B981), @"kw": @"rules json hook" },
-            @{ @"action": @"log", @"title": @"Xem nhật ký hoạt động (log.txt)", @"sub": @"Kiểm tra trạng thái các hook đang chạy", @"icon": @"doc.text.magnifyingglass", @"color": @(0xF59E0B), @"kw": @"log nhat ky" },
-            @{ @"action": @"exit", @"title": @"Khởi động lại Zalo", @"sub": @"Đóng ứng dụng ngay để nạp lại toàn bộ cấu hình mới", @"icon": @"power.circle.fill", @"color": @(0xE53935), @"kw": @"exit thoat khoi dong lai" },
-        ]},
+        @{
+            @"title": @"Quyền riêng tư & Ẩn danh",
+            @"desc": @"Tạm hiện chat ẩn, Danh sách chat đang ẩn, Khóa chat Face ID/PIN, Xem Story ẩn danh, Ẩn đã xem/đang nhập",
+            @"icon": @"eye.slash.fill",
+            @"color": @(0x3B82F6),
+            @"items": @[
+                @{ @"key": ZXK_UNHIDE_CHATS, @"title": @"Tạm hiện tất cả chat bị ẩn", @"sub": @"Quét property/ivar ẩn hội thoại và trả về NO để hiện trên danh sách chính", @"icon": @"eye.circle.fill", @"color": @(0x10B981), @"kw": @"tam hien chat an hidden conversation" },
+                @{ @"action": @"hidden_chats_list", @"title": @"Danh sách trò chuyện đang ẩn", @"sub": @"Xác thực Face ID / PIN để xem tên, UID, tin cuối và mở thẳng chat ẩn", @"icon": @"list.bullet.rectangle.portrait.fill", @"color": @(0x14B8A6), @"kw": @"danh sach tro chuyen dang an hidden list" },
+                @{ @"key": ZXK_CHAT_LOCK_ENABLED, @"title": @"Khóa phòng chat tự chọn (Face ID / PIN)", @"sub": @"Che mờ & yêu cầu Face ID / Mật khẩu khi mở phòng chat đã khóa", @"icon": @"lock.shield.fill", @"color": @(0xE53935), @"kw": @"khoa phong chat faceid pin lock" },
+                @{ @"action": @"set_lock_pin", @"title": @"Đặt / Đổi mã PIN dự phòng (4 số)", @"sub": @"Dùng để mở khóa chat và xem danh sách chat ẩn khi không dùng Face ID", @"icon": @"key.fill", @"color": @(0xF59E0B), @"kw": @"ma pin 4 so du phong" },
+                @{ @"action": @"locked_chats_list", @"title": @"Danh sách chat bị khóa", @"sub": @"Thêm/xóa phòng chat cần khóa (hoặc nhấn giữ hội thoại ở danh sách chat)", @"icon": @"lock.rectangle.stack.fill", @"color": @(0xEF4444), @"kw": @"danh sach chat bi khoa locked" },
+                @{ @"key": ZXK_GHOST_STORY, @"title": @"Xem Khoảnh khắc (Story) ẩn danh", @"sub": @"Chặn gửi gói tin xác nhận đã xem Story/Khoảnh khắc lên server", @"icon": @"sparkles.tv.fill", @"color": @(0x8B5CF6), @"kw": @"story khoanh khac an danh seen" },
+                @{ @"key": ZXK_BLOCK_SEEN, @"title": @"Chặn trạng thái \"Đã xem\"", @"sub": @"Người gửi không biết bạn đã đọc tin nhắn", @"icon": @"eye.slash.fill", @"color": @(0x3B82F6), @"kw": @"seen ghost da xem doc" },
+                @{ @"key": ZXK_SILENT_TYPING, @"title": @"Ẩn trạng thái \"Đang nhập\"", @"sub": @"Người nhận không thấy bạn đang soạn tin", @"icon": @"keyboard.fill", @"color": @(0x0EA5E9), @"kw": @"typing dang nhap soan go" },
+            ]
+        },
+        @{
+            @"title": @"Tin nhắn & Spam tự động",
+            @"desc": @"Gửi tin nhắn lặp lại, Chống thu hồi tin nhắn, Đánh dấu tin thu hồi",
+            @"icon": @"paperplane.fill",
+            @"color": @(0xE53935),
+            @"items": @[
+                @{ @"key": ZXK_MSG_REPEATER, @"title": @"Nút Spam nổi trên bàn phím (xN)", @"sub": @"Tự hiện nút đỏ ↻ xN ngay phía trên bàn phím khi mở khung chat Zalo", @"icon": @"repeat.circle.fill", @"color": @(0xE53935), @"kw": @"gui tin nhan lap lai repeater spam delay" },
+                @{ @"action": @"open_repeater", @"title": @"Mở bảng Gửi tin nhắn lặp lại", @"sub": @"Chọn nhanh 5/10/20/50 lần, tốc độ 0.3s/0.8s/1.5s và gửi vào phòng chat vừa mở", @"icon": @"paperplane.circle.fill", @"color": @(0xF97316), @"kw": @"mo bang gui tin lap lai spam" },
+                @{ @"key": ZXK_ANTI_RECALL, @"title": @"Chống thu hồi tin nhắn", @"sub": @"Tin vẫn hiển thị trong khung chat khi đối phương thu hồi", @"icon": @"shield.checkered", @"color": @(0x10B981), @"kw": @"anti recall chong thu hoi" },
+                @{ @"key": ZXK_SHOW_CONTENT, @"title": @"Hiện nội dung tin bị thu hồi/xóa", @"sub": @"Lưu tạm nội dung tin nhắn nhận được trên thiết bị", @"icon": @"text.bubble.fill", @"color": @(0x14B8A6), @"kw": @"noi dung thu hoi xoa" },
+                @{ @"key": ZXK_RECALL_NOTE, @"title": @"Đánh dấu nhãn \"đã thu hồi\"", @"sub": @"Hiện ghi chú nhỏ trong bong bóng tin nhắn được giữ lại", @"icon": @"tag.fill", @"color": @(0x059669), @"kw": @"nhan label da thu hoi" },
+                @{ @"key": ZXK_ANTI_RECALL_INCLUDE_ME, @"title": @"Áp dụng cả tin do mình thu hồi", @"sub": @"Giữ lại luôn tin nhắn do chính bạn thu hồi", @"icon": @"person.crop.circle.badge.checkmark", @"color": @(0x10B981), @"kw": @"minh thu hoi" },
+                @{ @"key": ZXK_ANTI_DELETE, @"title": @"Giữ tin bị xóa", @"sub": @"Ngăn xóa tin nhắn phía máy của bạn", @"icon": @"trash.slash.fill", @"color": @(0x22C55E), @"kw": @"anti delete chong xoa" },
+                @{ @"key": ZXK_ANTI_DELETE_INCLUDE_ME, @"title": @"Áp dụng cả tin do mình xóa", @"sub": @"Giữ lại luôn tin nhắn do chính bạn bấm xóa", @"icon": @"person.fill.checkmark", @"color": @(0x16A34A), @"kw": @"minh xoa" },
+                @{ @"action": @"history", @"title": @"Lịch sử tin bị thu hồi / xóa", @"sub": @"Xem danh sách toàn bộ tin nhắn đã bắt được", @"icon": @"clock.arrow.circlepath", @"color": @(0x0EA5E9), @"kw": @"lich su history" },
+                @{ @"action": @"clearmarks", @"title": @"Xóa danh sách tin đã đánh dấu", @"sub": @"Làm sạch các nhãn đã thu hồi trên khung chat", @"icon": @"sparkles", @"color": @(0xF59E0B), @"kw": @"xoa danh dau clear marks" },
+                @{ @"action": @"clearcache", @"title": @"Xóa bộ nhớ đệm tin nhắn", @"sub": @"Dọn dữ liệu tin nhắn lưu tạm trên máy", @"icon": @"internaldrive.fill", @"color": @(0xF97316), @"kw": @"xoa cache bo nho dem" },
+                @{ @"action": @"uid", @"title": @"User ID Zalo của bạn", @"sub": @"Dùng để phân biệt tin nhắn của bạn và người khác", @"icon": @"person.text.rectangle.fill", @"color": @(0x6366F1), @"kw": @"uid user id" },
+            ]
+        },
+        @{
+            @"title": @"Cuộc gọi & Âm thanh",
+            @"desc": @"Bảo vệ IP Force Relay, Ghi âm cuộc gọi tự động, Danh sách bản ghi âm, Tốc độ & Lưu tin nhắn thoại",
+            @"icon": @"phone.waves.left.and.right",
+            @"color": @(0x06B6D4),
+            @"items": @[
+                @{ @"key": ZXK_CALL_FORCE_RELAY, @"title": @"Bảo vệ IP cuộc gọi (Force Relay)", @"sub": @"Ép kết nối WebRTC/Zalo Call qua máy chủ Relay, chặn P2P/STUN lộ IP thật", @"icon": @"network.badge.shield.half.filled", @"color": @(0x06B6D4), @"kw": @"bao ve ip cuoc goi force relay webrtc stun p2p" },
+                @{ @"key": ZXK_AUTO_CALL_RECORD, @"title": @"Ghi âm cuộc gọi tự động (.m4a)", @"sub": @"Tự động ghi âm cuộc gọi thoại Zalo lưu vào Documents/NTHE_CallRecords/", @"icon": @"waveform.circle.fill", @"color": @(0xE53935), @"kw": @"ghi am cuoc goi tu dong call record m4a" },
+                @{ @"action": @"call_records_list", @"title": @"Danh sách bản ghi âm cuộc gọi", @"sub": @"Nghe lại, ghi âm thử hoặc chia sẻ các tệp .m4a đã lưu", @"icon": @"folder.fill.badge.waveform", @"color": @(0xF59E0B), @"kw": @"danh sach ban ghi am" },
+                @{ @"key": ZXK_VOICE_MSG_TOOLS, @"title": @"Tốc độ & Lưu tin nhắn thoại", @"sub": @"Cho phép phát tốc độ 1.0x/1.5x/2.0x và lưu tệp âm thanh gốc khi nhấn giữ", @"icon": @"speedometer", @"color": @(0x10B981), @"kw": @"toc do luu tin nhan thoai voice speed audio" },
+                @{ @"action": @"voice_speed_menu", @"title": @"Chỉnh tốc độ phát & Lưu thoại gần nhất", @"sub": @"Chọn nhanh 1.0x, 1.5x, 2.0x hoặc xuất file tin nhắn thoại vừa nghe", @"icon": @"slider.horizontal.below.waveform", @"color": @(0x14B8A6), @"kw": @"chinh toc do phat 1.5x 2.0x" },
+            ]
+        },
+        @{
+            @"title": @"Giao diện & Nút nổi",
+            @"desc": @"Đổi ảnh nút nổi từ Thư viện, Khôi phục Logo Zalo Đỏ, Thanh trượt kích thước nút nổi",
+            @"icon": @"paintbrush.fill",
+            @"color": @(0xF59E0B),
+            @"items": @[
+                @{ @"action": @"picklogo", @"title": @"Đổi ảnh nút nổi từ Thư viện", @"sub": @"Cắt tròn tự động, lưu vào Documents/nthe_custom_logo.png", @"icon": @"photo.circle.fill", @"color": @(0xE53935), @"kw": @"logo anh nut noi thu vien custom" },
+                @{ @"action": @"resetlogo", @"title": @"Khôi phục Logo Zalo Đỏ mặc định", @"sub": @"Dùng biểu tượng Zalo nền đỏ #E53935 vẽ bằng CoreGraphics", @"icon": @"arrow.counterclockwise.circle.fill", @"color": @(0xF97316), @"kw": @"khoi phuc mac dinh zalo do" },
+                @{ @"type": @"slider", @"title": @"Kích thước nút nổi", @"sub": @"Kéo để chỉnh độ lớn nút nổi ngay lập tức", @"icon": @"arrow.up.left.and.arrow.down.right.circle.fill", @"color": @(0xEF4444), @"kw": @"kich thuoc size nut noi slider" },
+                @{ @"key": ZXK_FLOATING_TABBAR, @"title": @"Thanh tab nổi bo tròn (thử nghiệm)", @"sub": @"Biến thanh Tin nhắn/Danh bạ dưới cùng thành thanh nổi hiện đại", @"icon": @"dock.rectangle", @"color": @(0x8B5CF6), @"kw": @"tabbar floating thanh tab noi" },
+                @{ @"action": @"tabbaridle", @"title": @"Thời gian tự thu gọn thanh tab (giây)", @"sub": @"Không chạm vào bao lâu thì tự co lại thành nút tròn (0 = tắt)", @"icon": @"timer", @"color": @(0x6366F1), @"kw": @"tabbar idle thu gon giay" },
+            ]
+        },
+        @{
+            @"title": @"Công cụ & Hệ thống",
+            @"desc": @"Chặn quảng cáo/theo dõi, Gửi ảnh/file chất lượng gốc, Quét runtime & Log",
+            @"icon": @"wrench.and.screwdriver.fill",
+            @"color": @(0x10B981),
+            @"items": @[
+                @{ @"key": ZXK_BLOCK_ADS, @"title": @"Chặn quảng cáo Zalo", @"sub": @"Chặn kết nối tới các máy chủ phân phối quảng cáo", @"icon": @"hand.raised.fill", @"color": @(0xEF4444), @"kw": @"ads quang cao chan" },
+                @{ @"key": ZXK_DISABLE_TRACKING, @"title": @"Tắt theo dõi hành vi (Tracking)", @"sub": @"Không gửi dữ liệu phân tích thao tác về máy chủ", @"icon": @"location.slash.fill", @"color": @(0xF59E0B), @"kw": @"tracking theo doi" },
+                @{ @"key": ZXK_BLOCK_QOS, @"title": @"Chặn báo cáo chất lượng (QoS)", @"sub": @"Giảm lưu lượng ngầm gửi định kỳ của ứng dụng", @"icon": @"antenna.radiowaves.left.and.right.slash", @"color": @(0xEAB308), @"kw": @"qos log" },
+                @{ @"key": ZXK_DISABLE_FIREBASE, @"title": @"Tắt Firebase Analytics", @"sub": @"Vô hiệu hóa thu thập thống kê Firebase", @"icon": @"flame.fill", @"color": @(0xF97316), @"kw": @"firebase logging" },
+                @{ @"key": ZXK_DEFAULT_ORIGINAL, @"title": @"Gửi ảnh chất lượng gốc (Original)", @"sub": @"Tự động bật chế độ ảnh gốc khi chọn ảnh gửi đi", @"icon": @"photo.fill", @"color": @(0xEC4899), @"kw": @"hd original anh goc" },
+                @{ @"key": ZXK_VIDEO_ORIGINAL, @"title": @"Gửi video giữ nguyên gốc (thử nghiệm)", @"sub": @"Bỏ qua bước nén giảm chất lượng video khi gửi", @"icon": @"video.fill", @"color": @(0xD946EF), @"kw": @"video hd original" },
+                @{ @"key": ZXK_UNLIMITED_MEDIA, @"title": @"Mở khóa giới hạn dung lượng gửi", @"sub": @"Cho phép đính kèm file và media dung lượng lớn", @"icon": @"externaldrive.fill.badge.plus", @"color": @(0xA855F7), @"kw": @"file size dung luong" },
+                @{ @"key": ZXK_TTL_OVERRIDE, @"title": @"Bật thời gian tự hủy tin nhắn (TTL)", @"sub": @"Áp dụng thời gian tự hủy tùy chỉnh cho tin bạn gửi", @"icon": @"hourglass", @"color": @(0xF43F5E), @"kw": @"ttl tu huy" },
+                @{ @"action": @"ttl", @"title": @"Đặt giá trị TTL (mili-giây)", @"sub": @"Nhập số ms tin nhắn tự hủy (ví dụ: 60000 = 1 phút)", @"icon": @"slider.horizontal.3", @"color": @(0xEC4899), @"kw": @"ttl ms gia tri" },
+                @{ @"action": @"scan", @"title": @"Quét Class / Method Runtime", @"sub": @"Dò danh sách hàm nội bộ của Zalo để viết hook", @"icon": @"magnifyingglass.circle.fill", @"color": @(0x3B82F6), @"kw": @"scan quet class method" },
+                @{ @"action": @"viewscan", @"title": @"Xem & Chia sẻ kết quả quét", @"sub": @"Mở hoặc xuất tệp scan.txt", @"icon": @"square.and.arrow.up.fill", @"color": @(0x0EA5E9), @"kw": @"view scan chia se" },
+                @{ @"action": @"rules", @"title": @"Trình sửa rules.json", @"sub": @"Chỉnh sửa quy tắc hook trực tiếp trong ứng dụng", @"icon": @"curlybraces.square.fill", @"color": @(0x10B981), @"kw": @"rules json hook" },
+                @{ @"action": @"log", @"title": @"Xem nhật ký hoạt động (log.txt)", @"sub": @"Kiểm tra trạng thái các hook đang chạy", @"icon": @"doc.text.magnifyingglass", @"color": @(0xF59E0B), @"kw": @"log nhat ky" },
+                @{ @"action": @"exit", @"title": @"Khởi động lại Zalo", @"sub": @"Đóng ứng dụng ngay để nạp lại toàn bộ cấu hình mới", @"icon": @"power.circle.fill", @"color": @(0xE53935), @"kw": @"exit thoat khoi dong lai" },
+            ]
+        }
     ];
 }
 
-static UIColor *ZXColorFromHex(NSUInteger hex, CGFloat alpha)
+// ---------------------------------------------------------------- Category Card Cell (Main Screen 5 Cards)
+
+@interface ZXCategoryCardCell : UITableViewCell
+@property (nonatomic, strong) UIView *cardContainer;
+@property (nonatomic, strong) UIView *iconBadge;
+@property (nonatomic, strong) UIImageView *iconView;
+@property (nonatomic, strong) UILabel *titleLabel;
+@property (nonatomic, strong) UILabel *descLabel;
+@property (nonatomic, strong) UILabel *countBadge;
+@property (nonatomic, strong) UIImageView *chevronView;
+- (void)configureWithCategory:(NSDictionary *)cat;
+@end
+
+@implementation ZXCategoryCardCell
+
+- (instancetype)initWithStyle:(UITableViewCellStyle)style reuseIdentifier:(NSString *)reuseIdentifier
 {
-    CGFloat r = ((hex >> 16) & 0xFF) / 255.0;
-    CGFloat g = ((hex >> 8) & 0xFF) / 255.0;
-    CGFloat b = (hex & 0xFF) / 255.0;
-    return [UIColor colorWithRed:r green:g blue:b alpha:alpha];
+    self = [super initWithStyle:style reuseIdentifier:reuseIdentifier];
+    if (!self) return nil;
+
+    if (@available(iOS 13.0, *)) self.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
+    if (@available(iOS 14.0, *)) {
+        self.automaticallyUpdatesBackgroundConfiguration = NO;
+        self.backgroundConfiguration = [UIBackgroundConfiguration clearConfiguration];
+    }
+    self.backgroundColor = UIColor.clearColor;
+    self.contentView.backgroundColor = UIColor.clearColor;
+    self.selectionStyle = UITableViewCellSelectionStyleNone;
+
+    _cardContainer = [UIView new];
+    _cardContainer.backgroundColor = ZXColorCardBg();
+    _cardContainer.layer.cornerRadius = 14.0;
+    if (@available(iOS 13.0, *)) _cardContainer.layer.cornerCurve = kCACornerCurveContinuous;
+    _cardContainer.layer.borderWidth = 1.0;
+    _cardContainer.layer.borderColor = ZXColorCardBorder().CGColor;
+    _cardContainer.clipsToBounds = YES;
+    _cardContainer.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.contentView addSubview:_cardContainer];
+
+    _iconBadge = [UIView new];
+    _iconBadge.layer.cornerRadius = 12.0;
+    _iconBadge.translatesAutoresizingMaskIntoConstraints = NO;
+    [_cardContainer addSubview:_iconBadge];
+
+    _iconView = [UIImageView new];
+    _iconView.contentMode = UIViewContentModeScaleAspectFit;
+    _iconView.translatesAutoresizingMaskIntoConstraints = NO;
+    [_iconBadge addSubview:_iconView];
+
+    _titleLabel = [UILabel new];
+    _titleLabel.font = [UIFont systemFontOfSize:16.5 weight:UIFontWeightBold];
+    _titleLabel.textColor = UIColor.whiteColor;
+    _titleLabel.numberOfLines = 1;
+    _titleLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    [_cardContainer addSubview:_titleLabel];
+
+    _descLabel = [UILabel new];
+    _descLabel.font = [UIFont systemFontOfSize:12.5 weight:UIFontWeightRegular];
+    _descLabel.textColor = ZXColorTextSub();
+    _descLabel.numberOfLines = 2;
+    _descLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    [_cardContainer addSubview:_descLabel];
+
+    _countBadge = [UILabel new];
+    _countBadge.font = [UIFont systemFontOfSize:12 weight:UIFontWeightBold];
+    _countBadge.textAlignment = NSTextAlignmentCenter;
+    _countBadge.layer.cornerRadius = 11.0;
+    _countBadge.layer.masksToBounds = YES;
+    _countBadge.translatesAutoresizingMaskIntoConstraints = NO;
+    [_cardContainer addSubview:_countBadge];
+
+    _chevronView = [UIImageView new];
+    if (@available(iOS 13.0, *)) {
+        UIImageSymbolConfiguration *cfg = [UIImageSymbolConfiguration configurationWithPointSize:14 weight:UIImageSymbolWeightBold];
+        _chevronView.image = [[UIImage systemImageNamed:@"chevron.right" withConfiguration:cfg] imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
+    }
+    _chevronView.tintColor = ZXColorTextSub();
+    _chevronView.contentMode = UIViewContentModeScaleAspectFit;
+    _chevronView.translatesAutoresizingMaskIntoConstraints = NO;
+    [_cardContainer addSubview:_chevronView];
+
+    [NSLayoutConstraint activateConstraints:@[
+        [_cardContainer.topAnchor constraintEqualToAnchor:self.contentView.topAnchor constant:6],
+        [_cardContainer.bottomAnchor constraintEqualToAnchor:self.contentView.bottomAnchor constant:-6],
+        [_cardContainer.leadingAnchor constraintEqualToAnchor:self.contentView.leadingAnchor constant:16],
+        [_cardContainer.trailingAnchor constraintEqualToAnchor:self.contentView.trailingAnchor constant:-16],
+
+        [_iconBadge.leadingAnchor constraintEqualToAnchor:_cardContainer.leadingAnchor constant:14],
+        [_iconBadge.centerYAnchor constraintEqualToAnchor:_cardContainer.centerYAnchor],
+        [_iconBadge.widthAnchor constraintEqualToConstant:46],
+        [_iconBadge.heightAnchor constraintEqualToConstant:46],
+
+        [_iconView.centerXAnchor constraintEqualToAnchor:_iconBadge.centerXAnchor],
+        [_iconView.centerYAnchor constraintEqualToAnchor:_iconBadge.centerYAnchor],
+        [_iconView.widthAnchor constraintEqualToConstant:24],
+        [_iconView.heightAnchor constraintEqualToConstant:24],
+
+        [_chevronView.trailingAnchor constraintEqualToAnchor:_cardContainer.trailingAnchor constant:-14],
+        [_chevronView.centerYAnchor constraintEqualToAnchor:_cardContainer.centerYAnchor],
+        [_chevronView.widthAnchor constraintEqualToConstant:12],
+        [_chevronView.heightAnchor constraintEqualToConstant:16],
+
+        [_countBadge.trailingAnchor constraintEqualToAnchor:_chevronView.leadingAnchor constant:-8],
+        [_countBadge.centerYAnchor constraintEqualToAnchor:_cardContainer.centerYAnchor],
+        [_countBadge.widthAnchor constraintGreaterThanOrEqualToConstant:44],
+        [_countBadge.heightAnchor constraintEqualToConstant:22],
+
+        [_titleLabel.topAnchor constraintEqualToAnchor:_cardContainer.topAnchor constant:14],
+        [_titleLabel.leadingAnchor constraintEqualToAnchor:_iconBadge.trailingAnchor constant:14],
+        [_titleLabel.trailingAnchor constraintEqualToAnchor:_countBadge.leadingAnchor constant:-10],
+
+        [_descLabel.topAnchor constraintEqualToAnchor:_titleLabel.bottomAnchor constant:4],
+        [_descLabel.leadingAnchor constraintEqualToAnchor:_titleLabel.leadingAnchor],
+        [_descLabel.trailingAnchor constraintEqualToAnchor:_titleLabel.trailingAnchor],
+        [_descLabel.bottomAnchor constraintLessThanOrEqualToAnchor:_cardContainer.bottomAnchor constant:-14],
+        [_cardContainer.heightAnchor constraintGreaterThanOrEqualToConstant:86],
+    ]];
+
+    return self;
 }
 
-// ---------------------------------------------------------------- Modern Grouped Row Cell
+- (void)configureWithCategory:(NSDictionary *)cat
+{
+    _titleLabel.text = cat[@"title"];
+    _descLabel.text = cat[@"desc"];
+    NSUInteger hex = [cat[@"color"] unsignedIntegerValue] ?: 0xE53935;
+    _iconBadge.backgroundColor = ZXColorFromHex(hex, 0.18);
+    _iconView.tintColor = ZXColorFromHex(hex, 1.0);
+    if (@available(iOS 13.0, *)) {
+        UIImageSymbolConfiguration *cfg = [UIImageSymbolConfiguration configurationWithPointSize:20 weight:UIImageSymbolWeightBold];
+        UIImage *im = [UIImage systemImageNamed:(cat[@"icon"] ?: @"folder.fill") withConfiguration:cfg];
+        _iconView.image = [im imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
+    }
+
+    NSInteger totalToggles = 0, activeToggles = 0;
+    for (NSDictionary *it in cat[@"items"]) {
+        NSString *k = it[@"key"];
+        if (k.length) {
+            totalToggles++;
+            if ([ZXConfig boolForKey:k]) activeToggles++;
+        }
+    }
+    if (totalToggles > 0) {
+        _countBadge.hidden = NO;
+        _countBadge.text = [NSString stringWithFormat:@" %ld/%ld ", (long)activeToggles, (long)totalToggles];
+        _countBadge.backgroundColor = activeToggles > 0 ? ZXColorFromHex(hex, 0.25) : [UIColor colorWithWhite:1.0 alpha:0.07];
+        _countBadge.textColor = activeToggles > 0 ? ZXColorFromHex(hex, 1.0) : ZXColorTextSub();
+    } else {
+        _countBadge.hidden = NO;
+        _countBadge.text = [NSString stringWithFormat:@" %lu mục ", (unsigned long)[cat[@"items"] count]];
+        _countBadge.backgroundColor = ZXColorFromHex(hex, 0.22);
+        _countBadge.textColor = ZXColorFromHex(hex, 1.0);
+    }
+}
+
+- (void)setHighlighted:(BOOL)highlighted animated:(BOOL)animated
+{
+    [super setHighlighted:highlighted animated:animated];
+    _cardContainer.backgroundColor = highlighted
+        ? [UIColor colorWithRed:0.14 green:0.16 blue:0.20 alpha:1.0]
+        : ZXColorCardBg();
+}
+
+@end
+
+// ---------------------------------------------------------------- Modern Feature Row Cell (Inside Popup & Search)
 
 @interface ZXModernRowCell : UITableViewCell
 @property (nonatomic, strong) UIView *cardContainer;
@@ -882,7 +1073,7 @@ static UIColor *ZXColorFromHex(NSUInteger hex, CGFloat alpha)
 
 @end
 
-// ---------------------------------------------------------------- Main Modern Grouped List Controller
+// ---------------------------------------------------------------- Category Popup Sheet & Main Controller
 
 static NSString *ZXFoldText(NSString *t)
 {
@@ -892,58 +1083,33 @@ static NSString *ZXFoldText(NSString *t)
     return f.lowercaseString;
 }
 
-@interface ZXMainViewController : UIViewController <UITableViewDataSource, UITableViewDelegate, UITextFieldDelegate, UIImagePickerControllerDelegate, UINavigationControllerDelegate>
-@property (nonatomic, strong) NSArray<NSDictionary *> *allSections;
-@property (nonatomic, strong) NSArray<NSDictionary *> *filteredSections;
+@interface ZXFeatureListViewController : UIViewController <UITableViewDataSource, UITableViewDelegate, UITextFieldDelegate, UIImagePickerControllerDelegate, UINavigationControllerDelegate>
+@property (nonatomic, strong) NSArray<NSDictionary *> *allCategories;
+@property (nonatomic, strong) NSDictionary *singleCategory; // non-nil when presented as Popup Sheet
+@property (nonatomic, copy) void (^onDismissCallback)(void);
+@property (nonatomic, strong) NSArray<NSDictionary *> *searchResults;
+@property (nonatomic, assign) BOOL isSearching;
 @property (nonatomic, strong) UITableView *tableView;
 @property (nonatomic, strong) UITextField *searchField;
 @end
 
-@implementation ZXMainViewController
+@implementation ZXFeatureListViewController
 
 - (void)viewDidLoad
 {
     [super viewDidLoad];
     if (@available(iOS 13.0, *)) self.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
-    self.title = @"thanhthe";
     self.view.backgroundColor = ZXColorBgPrimary();
-    self.allSections = ZXAllSections();
-    self.filteredSections = self.allSections;
+    self.allCategories = ZXFiveCategories();
 
-    self.navigationItem.leftBarButtonItem = ZXMakeNavButton(@"xmark.circle.fill", @"Đóng", ZXColorNavTint(), self, @selector(closeMenu));
-    self.navigationItem.rightBarButtonItem = ZXMakeNavButton(@"arrow.clockwise.circle.fill", @"Khởi động lại", ZXColorNavTint(), self, @selector(restartZalo));
-
-    UIView *searchHeader = [[UIView alloc] initWithFrame:CGRectMake(0, 0, self.view.bounds.size.width, 60)];
-    searchHeader.backgroundColor = ZXColorBgPrimary();
-
-    UIView *searchBox = [[UIView alloc] initWithFrame:CGRectMake(16, 10, self.view.bounds.size.width - 32, 42)];
-    searchBox.autoresizingMask = UIViewAutoresizingFlexibleWidth;
-    searchBox.backgroundColor = ZXColorCardBg();
-    searchBox.layer.cornerRadius = 12.0;
-    searchBox.layer.borderWidth = 1.0;
-    searchBox.layer.borderColor = ZXColorCardBorder().CGColor;
-
-    UIImageView *searchIcon = [[UIImageView alloc] initWithFrame:CGRectMake(12, 12, 18, 18)];
-    if (@available(iOS 13.0, *)) {
-        UIImageSymbolConfiguration *cfg = [UIImageSymbolConfiguration configurationWithPointSize:14 weight:UIImageSymbolWeightSemibold];
-        searchIcon.image = [[UIImage systemImageNamed:@"magnifyingglass" withConfiguration:cfg] imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
+    if (self.singleCategory) {
+        self.title = self.singleCategory[@"title"];
+        self.navigationItem.rightBarButtonItem = ZXMakeNavButton(@"xmark.circle.fill", @"Đóng", ZXColorNavTint(), self, @selector(closeSheet));
+    } else {
+        self.title = @"thanhthe";
+        self.navigationItem.leftBarButtonItem = ZXMakeNavButton(@"xmark.circle.fill", @"Đóng", ZXColorNavTint(), self, @selector(closeMenu));
+        self.navigationItem.rightBarButtonItem = ZXMakeNavButton(@"arrow.clockwise.circle.fill", @"Khởi động lại", ZXColorNavTint(), self, @selector(restartZalo));
     }
-    searchIcon.tintColor = ZXColorTextSub();
-    [searchBox addSubview:searchIcon];
-
-    self.searchField = [[UITextField alloc] initWithFrame:CGRectMake(36, 0, searchBox.bounds.size.width - 44, 42)];
-    self.searchField.autoresizingMask = UIViewAutoresizingFlexibleWidth;
-    self.searchField.textColor = UIColor.whiteColor;
-    self.searchField.tintColor = ZXColorZaloRed();
-    self.searchField.font = [UIFont systemFontOfSize:14.5 weight:UIFontWeightMedium];
-    self.searchField.clearButtonMode = UITextFieldViewModeWhileEditing;
-    self.searchField.returnKeyType = UIReturnKeyDone;
-    self.searchField.delegate = self;
-    self.searchField.attributedPlaceholder = [[NSAttributedString alloc] initWithString:@"Tìm nhanh tính năng, công tắc..."
-        attributes:@{ NSForegroundColorAttributeName: ZXColorTextSub() }];
-    [self.searchField addTarget:self action:@selector(searchChanged:) forControlEvents:UIControlEventEditingChanged];
-    [searchBox addSubview:self.searchField];
-    [searchHeader addSubview:searchBox];
 
     self.tableView = [[UITableView alloc] initWithFrame:self.view.bounds style:UITableViewStyleGrouped];
     if (@available(iOS 13.0, *)) self.tableView.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
@@ -953,10 +1119,46 @@ static NSString *ZXFoldText(NSString *t)
     self.tableView.dataSource = self;
     self.tableView.delegate = self;
     self.tableView.rowHeight = UITableViewAutomaticDimension;
-    self.tableView.estimatedRowHeight = 76;
+    self.tableView.estimatedRowHeight = 82;
     self.tableView.keyboardDismissMode = UIScrollViewKeyboardDismissModeOnDrag;
-    self.tableView.tableHeaderView = searchHeader;
+    [self.tableView registerClass:[ZXCategoryCardCell class] forCellReuseIdentifier:@"ZXCategoryCardCell"];
     [self.tableView registerClass:[ZXModernRowCell class] forCellReuseIdentifier:@"ZXModernRowCell"];
+
+    if (!self.singleCategory) {
+        UIView *searchHeader = [[UIView alloc] initWithFrame:CGRectMake(0, 0, self.view.bounds.size.width, 62)];
+        searchHeader.backgroundColor = ZXColorBgPrimary();
+
+        UIView *searchBox = [[UIView alloc] initWithFrame:CGRectMake(16, 10, self.view.bounds.size.width - 32, 42)];
+        searchBox.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+        searchBox.backgroundColor = ZXColorCardBg();
+        searchBox.layer.cornerRadius = 12.0;
+        searchBox.layer.borderWidth = 1.0;
+        searchBox.layer.borderColor = ZXColorCardBorder().CGColor;
+
+        UIImageView *searchIcon = [[UIImageView alloc] initWithFrame:CGRectMake(12, 12, 18, 18)];
+        if (@available(iOS 13.0, *)) {
+            UIImageSymbolConfiguration *cfg = [UIImageSymbolConfiguration configurationWithPointSize:14 weight:UIImageSymbolWeightSemibold];
+            searchIcon.image = [[UIImage systemImageNamed:@"magnifyingglass" withConfiguration:cfg] imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
+        }
+        searchIcon.tintColor = ZXColorTextSub();
+        [searchBox addSubview:searchIcon];
+
+        self.searchField = [[UITextField alloc] initWithFrame:CGRectMake(36, 0, searchBox.bounds.size.width - 44, 42)];
+        self.searchField.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+        self.searchField.textColor = UIColor.whiteColor;
+        self.searchField.tintColor = ZXColorZaloRed();
+        self.searchField.font = [UIFont systemFontOfSize:14.5 weight:UIFontWeightMedium];
+        self.searchField.clearButtonMode = UITextFieldViewModeWhileEditing;
+        self.searchField.returnKeyType = UIReturnKeyDone;
+        self.searchField.delegate = self;
+        self.searchField.attributedPlaceholder = [[NSAttributedString alloc] initWithString:@"Tìm nhanh tính năng trong 5 nhóm..."
+            attributes:@{ NSForegroundColorAttributeName: ZXColorTextSub() }];
+        [self.searchField addTarget:self action:@selector(searchChanged:) forControlEvents:UIControlEventEditingChanged];
+        [searchBox addSubview:self.searchField];
+        [searchHeader addSubview:searchBox];
+        self.tableView.tableHeaderView = searchHeader;
+    }
+
     [self.view addSubview:self.tableView];
 }
 
@@ -965,6 +1167,17 @@ static NSString *ZXFoldText(NSString *t)
     [super viewWillAppear:animated];
     ZXStyleNavBar(self.navigationController.navigationBar);
     [self.tableView reloadData];
+}
+
+- (void)viewDidDisappear:(BOOL)animated
+{
+    [super viewDidDisappear:animated];
+    if (self.onDismissCallback) self.onDismissCallback();
+}
+
+- (void)closeSheet
+{
+    [self dismissViewControllerAnimated:YES completion:self.onDismissCallback];
 }
 
 - (void)closeMenu
@@ -999,14 +1212,16 @@ static NSString *ZXFoldText(NSString *t)
 {
     NSString *raw = [(tf.text ?: @"") stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
     if (raw.length == 0) {
-        self.filteredSections = self.allSections;
+        self.isSearching = NO;
+        self.searchResults = @[];
         [self.tableView reloadData];
         return;
     }
+    self.isSearching = YES;
     NSArray<NSString *> *tokens = [[ZXFoldText(raw) componentsSeparatedByString:@" "]
         filteredArrayUsingPredicate:[NSPredicate predicateWithFormat:@"length > 0"]];
     NSMutableArray *out = [NSMutableArray new];
-    for (NSDictionary *sec in self.allSections) {
+    for (NSDictionary *sec in self.allCategories) {
         NSMutableArray *hits = [NSMutableArray new];
         for (NSDictionary *it in sec[@"items"]) {
             NSString *hay = ZXFoldText([NSString stringWithFormat:@"%@ %@ %@ %@",
@@ -1023,31 +1238,70 @@ static NSString *ZXFoldText(NSString *t)
             [out addObject:copy];
         }
     }
-    self.filteredSections = out;
+    self.searchResults = out;
     [self.tableView reloadData];
+}
+
+- (void)openCategoryPopup:(NSDictionary *)cat
+{
+    ZXFeatureListViewController *sheetVC = [ZXFeatureListViewController new];
+    sheetVC.singleCategory = cat;
+    __weak typeof(self) weakSelf = self;
+    sheetVC.onDismissCallback = ^{
+        [weakSelf.tableView reloadData];
+    };
+    UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:sheetVC];
+    if (@available(iOS 13.0, *)) nav.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
+    ZXStyleNavBar(nav.navigationBar);
+    nav.modalPresentationStyle = UIModalPresentationPageSheet;
+    if (@available(iOS 15.0, *)) {
+        UISheetPresentationController *sheet = nav.sheetPresentationController;
+        if (sheet) {
+            sheet.detents = @[UISheetPresentationControllerDetent.mediumDetent, UISheetPresentationControllerDetent.largeDetent];
+            sheet.prefersGrabberVisible = YES;
+            sheet.preferredCornerRadius = 22.0;
+        }
+    }
+    [self presentViewController:nav animated:YES completion:nil];
 }
 
 // ---------------------------------------------------------------- TableView DataSource & Delegate
 
+- (NSArray<NSDictionary *> *)activeFeatureSections
+{
+    if (self.singleCategory) return @[self.singleCategory];
+    return self.searchResults ?: @[];
+}
+
 - (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView
 {
     (void)tableView;
-    return self.filteredSections.count;
+    if (!self.singleCategory && !self.isSearching) {
+        return 1; // 5 Category Cards in 1 clean list
+    }
+    return [self activeFeatureSections].count;
 }
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section
 {
     (void)tableView;
-    return [self.filteredSections[section][@"items"] count];
+    if (!self.singleCategory && !self.isSearching) {
+        return self.allCategories.count;
+    }
+    return [[self activeFeatureSections][section][@"items"] count];
 }
 
 - (UIView *)tableView:(UITableView *)tableView viewForHeaderInSection:(NSInteger)section
 {
-    UIView *v = [[UIView alloc] initWithFrame:CGRectMake(0, 0, tableView.bounds.size.width, 36)];
+    UIView *v = [[UIView alloc] initWithFrame:CGRectMake(0, 0, tableView.bounds.size.width, 32)];
     v.backgroundColor = UIColor.clearColor;
-    UILabel *l = [[UILabel alloc] initWithFrame:CGRectMake(22, 10, tableView.bounds.size.width - 44, 20)];
-    l.text = self.filteredSections[section][@"title"];
-    l.font = [UIFont systemFontOfSize:12 weight:UIFontWeightHeavy];
+    UILabel *l = [[UILabel alloc] initWithFrame:CGRectMake(22, 6, tableView.bounds.size.width - 44, 20)];
+    if (!self.singleCategory && !self.isSearching) {
+        l.text = @"CHỌN NHÓM TÍNH NĂNG (BẤM ĐỂ MỞ BẢNG)";
+    } else {
+        l.text = [[self activeFeatureSections][section][@"title"] uppercaseString];
+    }
+    l.font = [UIFont systemFontOfSize:11.5 weight:UIFontWeightHeavy];
     l.textColor = ZXColorTextSub();
     [v addSubview:l];
     return v;
@@ -1056,12 +1310,13 @@ static NSString *ZXFoldText(NSString *t)
 - (CGFloat)tableView:(UITableView *)tableView heightForHeaderInSection:(NSInteger)section
 {
     (void)tableView; (void)section;
-    return 36.0;
+    return 32.0;
 }
 
 - (UIView *)tableView:(UITableView *)tableView viewForFooterInSection:(NSInteger)section
 {
-    if (section != (NSInteger)self.filteredSections.count - 1) return nil;
+    NSInteger totalSec = [self numberOfSectionsInTableView:tableView];
+    if (section != totalSec - 1) return nil;
     UIView *v = [[UIView alloc] initWithFrame:CGRectMake(0, 0, tableView.bounds.size.width, 64)];
     UILabel *l = [[UILabel alloc] initWithFrame:CGRectMake(20, 10, tableView.bounds.size.width - 40, 44)];
     l.numberOfLines = 0;
@@ -1075,14 +1330,22 @@ static NSString *ZXFoldText(NSString *t)
 
 - (CGFloat)tableView:(UITableView *)tableView heightForFooterInSection:(NSInteger)section
 {
-    (void)tableView;
-    return (section == (NSInteger)self.filteredSections.count - 1) ? 68.0 : 6.0;
+    NSInteger totalSec = [self numberOfSectionsInTableView:tableView];
+    return (section == totalSec - 1) ? 68.0 : 6.0;
 }
 
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath
 {
+    // Main Screen mode: render the 5 Category Cards
+    if (!self.singleCategory && !self.isSearching) {
+        ZXCategoryCardCell *card = [tableView dequeueReusableCellWithIdentifier:@"ZXCategoryCardCell" forIndexPath:indexPath];
+        [card configureWithCategory:self.allCategories[indexPath.row]];
+        return card;
+    }
+
+    // Popup Sheet or Search mode: render feature row
     ZXModernRowCell *cell = [tableView dequeueReusableCellWithIdentifier:@"ZXModernRowCell" forIndexPath:indexPath];
-    NSDictionary *item = self.filteredSections[indexPath.section][@"items"][indexPath.row];
+    NSDictionary *item = [self activeFeatureSections][indexPath.section][@"items"][indexPath.row];
 
     cell.titleLabel.text = item[@"title"];
     NSString *action = item[@"action"];
@@ -1174,8 +1437,9 @@ static NSString *ZXFoldText(NSString *t)
 {
     NSInteger sec = sw.tag / 1000;
     NSInteger row = sw.tag % 1000;
-    if (sec < 0 || sec >= (NSInteger)self.filteredSections.count) return;
-    NSArray *items = self.filteredSections[sec][@"items"];
+    NSArray<NSDictionary *> *secs = [self activeFeatureSections];
+    if (sec < 0 || sec >= (NSInteger)secs.count) return;
+    NSArray *items = secs[sec][@"items"];
     if (row < 0 || row >= (NSInteger)items.count) return;
     NSDictionary *item = items[row];
     NSString *key = item[@"key"];
@@ -1184,6 +1448,8 @@ static NSString *ZXFoldText(NSString *t)
     [ZXConfig setBool:sw.on forKey:key];
     if ([key isEqualToString:ZXK_FLOATING_TABBAR]) {
         ZXHookFloatingTabBar();
+    } else if ([key isEqualToString:ZXK_UNHIDE_CHATS] && sw.on) {
+        [ZXHookEngine scanMemoryForHiddenChats];
     }
 }
 
@@ -1284,7 +1550,15 @@ static NSString *ZXFoldText(NSString *t)
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath
 {
     [tableView deselectRowAtIndexPath:indexPath animated:YES];
-    NSDictionary *item = self.filteredSections[indexPath.section][@"items"][indexPath.row];
+
+    // Main screen category card tap -> open Popup Sheet
+    if (!self.singleCategory && !self.isSearching) {
+        NSDictionary *cat = self.allCategories[indexPath.row];
+        [self openCategoryPopup:cat];
+        return;
+    }
+
+    NSDictionary *item = [self activeFeatureSections][indexPath.section][@"items"][indexPath.row];
     NSString *action = item[@"action"];
     if (!action) return;
 
@@ -2037,9 +2311,9 @@ static void ZXHookFloatingTabBar(void)
     if (!top) return;
     if ([top isKindOfClass:[UINavigationController class]]) {
         UIViewController *first = ((UINavigationController *)top).viewControllers.firstObject;
-        if ([first isKindOfClass:[ZXMainViewController class]]) return;
+        if ([first isKindOfClass:[ZXFeatureListViewController class]]) return;
     }
-    ZXMainViewController *mainVC = [ZXMainViewController new];
+    ZXFeatureListViewController *mainVC = [ZXFeatureListViewController new];
     UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:mainVC];
     if (@available(iOS 13.0, *)) nav.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
     nav.modalPresentationStyle = UIModalPresentationFullScreen;
