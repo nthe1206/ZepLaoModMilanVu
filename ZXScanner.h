@@ -5,7 +5,9 @@
 @interface ZXScanner : NSObject
 + (NSString *)runScan;   // returns path of scan.txt
 + (NSString *)scanPath;
++ (NSString *)resolvedProfilesPath;
 + (NSArray<NSDictionary *> *)scanSQLiteForHiddenChats;
 + (BOOL)unhideChatInSQLiteWithID:(NSString *)chatID;
 + (BOOL)isGarbageChatIdentifier:(NSString *)str;
++ (BOOL)isValidHumanDisplayName:(NSString *)str excludeUID:(NSString *)excludeUID;
 @end

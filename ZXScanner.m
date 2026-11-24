@@ -552,20 +552,79 @@ static void ZXEnrichHiddenChatsInDatabase(NSString *dbPath, NSMutableDictionary<
     return ZXIsGarbageString(str);
 }
 
++ (BOOL)isValidHumanDisplayName:(NSString *)str excludeUID:(NSString *)excludeUID
+{
+    return ZXIsValidHumanDisplayName(str, excludeUID);
+}
+
 + (NSString *)scanPath
 {
     return [[ZXConfig dataDir] stringByAppendingPathComponent:@"scan.txt"];
+}
+
++ (NSString *)resolvedProfilesPath
+{
+    return [[ZXConfig dataDir] stringByAppendingPathComponent:@"zx_resolved_profiles.json"];
 }
 
 + (NSArray<NSDictionary *> *)scanSQLiteForHiddenChats
 {
     NSMutableDictionary<NSString *, NSMutableDictionary *> *found = [NSMutableDictionary new];
     @try {
+        // Load RAM-indexed decrypted profiles from zx_resolved_profiles.json
+        NSDictionary<NSString *, NSDictionary *> *ramProfiles = @{};
+        NSData *ramData = [NSData dataWithContentsOfFile:[self resolvedProfilesPath]];
+        if (ramData) {
+            id obj = [NSJSONSerialization JSONObjectWithData:ramData options:0 error:nil];
+            if ([obj isKindOfClass:[NSDictionary class]]) {
+                ramProfiles = (NSDictionary *)obj;
+            }
+        }
+
+        // Include any profile that was flagged as hidden directly in RAM
+        for (NSString *uid in ramProfiles) {
+            if (ZXIsGarbageString(uid)) continue;
+            NSDictionary *prof = ramProfiles[uid];
+            if (![prof isKindOfClass:[NSDictionary class]]) continue;
+            if ([prof[@"isHidden"] boolValue]) {
+                NSString *rName = [prof[@"name"] description] ?: @"";
+                NSString *rMsg = [prof[@"lastMessage"] description] ?: @"";
+                found[uid] = [NSMutableDictionary dictionaryWithDictionary:@{
+                    @"uid": uid,
+                    @"rawName": ZXIsValidHumanDisplayName(rName, uid) ? rName : @"",
+                    @"lastMessage": rMsg,
+                    @"sourceTable": @"RAM Cache (zx_resolved_profiles.json)",
+                    @"updatedAt": prof[@"timestamp"] ?: @((long long)[[NSDate date] timeIntervalSince1970])
+                }];
+            }
+        }
+
         NSArray<NSString *> *dbPaths = ZXAllZaloSQLitePaths();
 
         // Pass 1: Discover all hidden chat IDs from HiddenChatEntity & hidden columns
         for (NSString *path in dbPaths) {
             ZXScanDatabaseForHiddenIDs(path, found);
+        }
+
+        // Overlay RAM-decrypted profile names & messages onto every discovered hidden chat ID
+        for (NSString *uid in found) {
+            NSMutableDictionary *entry = found[uid];
+            NSDictionary *prof = ramProfiles[uid];
+            if (!prof) {
+                NSString *cleanDigits = [[uid componentsSeparatedByCharactersInSet:
+                                         [[NSCharacterSet decimalDigitCharacterSet] invertedSet]] componentsJoinedByString:@""];
+                if (cleanDigits.length >= 5) prof = ramProfiles[cleanDigits];
+            }
+            if ([prof isKindOfClass:[NSDictionary class]]) {
+                NSString *pName = [prof[@"name"] description] ?: @"";
+                NSString *pMsg = [prof[@"lastMessage"] description] ?: @"";
+                if (ZXIsValidHumanDisplayName(pName, uid)) {
+                    entry[@"rawName"] = pName;
+                }
+                if (pMsg.length > 0 && !ZXIsGarbageString(pMsg)) {
+                    entry[@"lastMessage"] = pMsg;
+                }
+            }
         }
 
         // Pass 2: First enrich inside the same DB where each hidden chat was found (e.g. search/global.sqlite), then across all other SQLite DBs
@@ -607,8 +666,8 @@ static void ZXEnrichHiddenChatsInDatabase(NSString *dbPath, NSMutableDictionary<
             }];
         }
 
-        ZXLog(@"SQLite exact-match 2-pass scan inspected %lu DBs, resolved %lu hidden chats",
-              (unsigned long)dbPaths.count, (unsigned long)finalList.count);
+        ZXLog(@"SQLite+RAM exact-match scan inspected %lu DBs (%lu RAM profiles), resolved %lu hidden chats",
+              (unsigned long)dbPaths.count, (unsigned long)ramProfiles.count, (unsigned long)finalList.count);
         return finalList;
     } @catch (NSException *e) {
         ZXLog(@"scanSQLiteForHiddenChats exception: %@", e.reason);

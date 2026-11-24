@@ -780,12 +780,13 @@ static NSArray<NSDictionary *> *ZXFiveCategories(void)
     return @[
         @{
             @"title": @"Quyền riêng tư & Ẩn danh",
-            @"desc": @"Tạm hiện chat ẩn, Danh sách chat đang ẩn, Khóa chat Face ID/PIN, Xem Story ẩn danh, Ẩn đã xem/đang nhập",
+            @"desc": @"Tạm hiện chat ẩn, Danh sách chat đang ẩn, Khóa chat Face ID/PIN, Giữ kết nối nhận tin nền, Xem Story ẩn danh",
             @"icon": @"eye.slash.fill",
             @"color": @(0x3B82F6),
             @"items": @[
                 @{ @"key": ZXK_UNHIDE_CHATS, @"title": @"Tạm hiện tất cả chat bị ẩn", @"sub": @"Quét SQLite & RAM ẩn hội thoại và trả về NO để hiện trên danh sách chính", @"icon": @"eye.circle.fill", @"color": @(0x10B981), @"kw": @"tam hien chat an hidden conversation" },
-                @{ @"action": @"hidden_chats_list", @"title": @"Danh sách trò chuyện đang ẩn", @"sub": @"Xác thực Face ID / PIN để quét SQLite, xem tên, UID, tin cuối và mở thẳng chat", @"icon": @"list.bullet.rectangle.portrait.fill", @"color": @(0x14B8A6), @"kw": @"danh sach tro chuyen dang an hidden list" },
+                @{ @"action": @"hidden_chats_list", @"title": @"Danh sách trò chuyện đang ẩn", @"sub": @"Xác thực Face ID / PIN để quét SQLite + RAM Profile, xem tên thật và mở thẳng chat", @"icon": @"list.bullet.rectangle.portrait.fill", @"color": @(0x14B8A6), @"kw": @"danh sach tro chuyen dang an hidden list" },
+                @{ @"key": ZXK_KEEP_ALIVE_BG, @"title": @"Giữ kết nối nhận tin nền (Anti-Sleep)", @"sub": @"Duy trì WebSocket & âm thanh im lặng 8000Hz khi ẩn ứng dụng ra màn hình chính", @"icon": @"antenna.radiowaves.left.and.right.circle.fill", @"color": @(0x22C55E), @"kw": @"giu ket noi nhan tin nen anti sleep background keep alive" },
                 @{ @"key": ZXK_CHAT_LOCK_ENABLED, @"title": @"Khóa phòng chat tự chọn (Face ID / PIN)", @"sub": @"Che mờ & yêu cầu Face ID / Mật khẩu khi mở phòng chat đã khóa", @"icon": @"lock.shield.fill", @"color": @(0xE53935), @"kw": @"khoa phong chat faceid pin lock" },
                 @{ @"action": @"set_lock_pin", @"title": @"Đặt / Đổi mã PIN dự phòng (4 số)", @"sub": @"Dùng để mở khóa chat và xem danh sách chat ẩn khi không dùng Face ID", @"icon": @"key.fill", @"color": @(0xF59E0B), @"kw": @"ma pin 4 so du phong" },
                 @{ @"action": @"locked_chats_list", @"title": @"Danh sách chat bị khóa", @"sub": @"Thêm/xóa phòng chat cần khóa (hoặc nhấn giữ hội thoại ở danh sách chat)", @"icon": @"lock.rectangle.stack.fill", @"color": @(0xEF4444), @"kw": @"danh sach chat bi khoa locked" },
@@ -801,7 +802,7 @@ static NSArray<NSDictionary *> *ZXFiveCategories(void)
             @"color": @(0xE53935),
             @"items": @[
                 @{ @"key": ZXK_MSG_REPEATER, @"title": @"Nút Spam nổi trên bàn phím (↻ xN)", @"sub": @"Hiện nút đỏ ↻ xN ở tầng cửa sổ cao nhất ngay phía trên bàn phím Zalo", @"icon": @"repeat.circle.fill", @"color": @(0xE53935), @"kw": @"gui tin nhan lap lai repeater spam delay" },
-                @{ @"action": @"open_repeater", @"title": @"Mở bảng Gửi tin nhắn lặp lại", @"sub": @"Chọn nhanh 5/10/20/50 lần, tốc độ 0.3s/0.8s/1.5s, chống trùng tin", @"icon": @"paperplane.circle.fill", @"color": @(0xF97316), @"kw": @"mo bang gui tin lap lai spam" },
+                @{ @"action": @"open_repeater", @"title": @"Mở bảng Gửi tin nhắn lặp lại", @"sub": @"Chọn nhanh 5/10/20/50 lần, giãn cách 0.1s–2.0s tùy chỉnh, chống trùng tin", @"icon": @"paperplane.circle.fill", @"color": @(0xF97316), @"kw": @"mo bang gui tin lap lai spam delay" },
                 @{ @"key": ZXK_ANTI_RECALL, @"title": @"Chống thu hồi tin nhắn", @"sub": @"Tin vẫn hiển thị trong khung chat khi đối phương thu hồi", @"icon": @"shield.checkered", @"color": @(0x10B981), @"kw": @"anti recall chong thu hoi" },
                 @{ @"key": ZXK_SHOW_CONTENT, @"title": @"Hiện nội dung tin bị thu hồi/xóa", @"sub": @"Lưu tạm nội dung tin nhắn nhận được trên thiết bị", @"icon": @"text.bubble.fill", @"color": @(0x14B8A6), @"kw": @"noi dung thu hoi xoa" },
                 @{ @"key": ZXK_RECALL_NOTE, @"title": @"Đánh dấu nhãn \"đã thu hồi\"", @"sub": @"Hiện ghi chú nhỏ trong bong bóng tin nhắn được giữ lại", @"icon": @"tag.fill", @"color": @(0x059669), @"kw": @"nhan label da thu hoi" },

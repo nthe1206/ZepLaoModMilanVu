@@ -32,6 +32,8 @@
 #define ZXK_AUTO_CALL_RECORD       @"nthe_auto_call_record"
 #define ZXK_VOICE_MSG_TOOLS        @"nthe_voice_msg_tools"
 #define ZXK_VOICE_PLAYBACK_RATE    @"nthe_voice_playback_rate"
+#define ZXK_SPAM_DELAY_SEC         @"zx_spam_delay_sec"
+#define ZXK_KEEP_ALIVE_BG          @"zx_keep_alive_bg"
 
 @interface ZXConfig : NSObject
 + (void)registerDefaults;
@@ -49,6 +51,9 @@
 + (void)setCustomLogoMode:(BOOL)value;
 + (double)bubbleSize;
 + (void)setBubbleSize:(double)value;
+/// Delay between repeated messages in seconds (default 0.5, min 0.05)
++ (double)spamDelaySeconds;
++ (void)setSpamDelaySeconds:(double)sec;
 /// Documents/nthe_custom_logo.png
 + (NSString *)customLogoPath;
 /// PIN 4 digits for locked chats & hidden chats viewer

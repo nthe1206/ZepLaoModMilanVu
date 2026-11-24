@@ -47,6 +47,8 @@ static NSUserDefaults *ZXDefaults(void)
         ZXK_AUTO_CALL_RECORD: @NO,
         ZXK_VOICE_MSG_TOOLS: @NO,
         ZXK_VOICE_PLAYBACK_RATE: @1.0,
+        ZXK_SPAM_DELAY_SEC: @0.5,
+        ZXK_KEEP_ALIVE_BG: @YES,
         kTTL: @0,
         kUID: @"",
         kTabBarIdle: @10,
@@ -75,6 +77,17 @@ static NSUserDefaults *ZXDefaults(void)
     double clamped = MAX(38.0, MIN(92.0, value));
     [ZXDefaults() setObject:@(clamped) forKey:ZXK_BUBBLE_SIZE];
     [[NSUserDefaults standardUserDefaults] setObject:@(clamped) forKey:ZXK_BUBBLE_SIZE];
+}
++ (double)spamDelaySeconds {
+    id obj = [ZXDefaults() objectForKey:ZXK_SPAM_DELAY_SEC];
+    double s = obj ? [obj doubleValue] : 0.5;
+    if (s < 0.05 || s > 60.0) s = 0.5;
+    return s;
+}
++ (void)setSpamDelaySeconds:(double)sec {
+    double clamped = MAX(0.05, MIN(60.0, sec));
+    [ZXDefaults() setObject:@(clamped) forKey:ZXK_SPAM_DELAY_SEC];
+    [[NSUserDefaults standardUserDefaults] setObject:@(clamped) forKey:ZXK_SPAM_DELAY_SEC];
 }
 + (NSString *)customLogoPath
 {
