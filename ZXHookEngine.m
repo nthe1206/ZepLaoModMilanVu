@@ -201,7 +201,90 @@ static NSString *ZXReadStringKVC(id obj, NSArray<NSString *> *keys)
     return @"";
 }
 
-/// Safely indexes a decrypted Zalo model object in RAM into zx_resolved_profiles.json.
+static void ZXRecordResolvedProfile(NSString *uid, NSString *name, NSString *lastMsg, BOOL isHidden)
+{
+    if (uid.length < 4 || [ZXScanner isGarbageChatIdentifier:uid]) return;
+    if (![ZXScanner isValidHumanDisplayName:name excludeUID:uid]) name = @"";
+    if ([ZXScanner isGarbageChatIdentifier:lastMsg]) lastMsg = @"";
+    if (name.length == 0 && lastMsg.length == 0 && !isHidden) return;
+
+    ZXInitHiddenChatsStore();
+    NSString *cleanDigits = [[uid componentsSeparatedByCharactersInSet:
+                             [[NSCharacterSet decimalDigitCharacterSet] invertedSet]] componentsJoinedByString:@""];
+    NSString *mergedName = name;
+    NSString *mergedMsg = lastMsg;
+    BOOL mergedHidden = isHidden;
+    long long nowTs = (long long)[[NSDate date] timeIntervalSince1970];
+
+    @synchronized (gResolvedProfilesMap) {
+        NSDictionary *old = gResolvedProfilesMap[uid] ?: (cleanDigits.length >= 5 ? gResolvedProfilesMap[cleanDigits] : nil);
+        if (mergedName.length == 0) mergedName = old[@"name"] ?: @"";
+        if (mergedMsg.length == 0) mergedMsg = old[@"lastMessage"] ?: @"";
+        mergedHidden = isHidden || [old[@"isHidden"] boolValue];
+        if ([sUnhiddenThreadIDs containsObject:uid]) mergedHidden = NO;
+
+        NSDictionary *entry = @{
+            @"uid": uid,
+            @"name": mergedName,
+            @"lastMessage": mergedMsg,
+            @"isHidden": @(mergedHidden),
+            @"timestamp": @(nowTs)
+        };
+        gResolvedProfilesMap[uid] = entry;
+        if (cleanDigits.length >= 5 && ![cleanDigits isEqualToString:uid]) {
+            gResolvedProfilesMap[cleanDigits] = entry;
+        }
+    }
+    ZXScheduleSaveResolvedProfiles();
+
+    // If this ID matches an existing hidden chat (e.g. from HiddenChatEntity) or is flagged hidden, update hidden_chats.json immediately
+    BOOL updatedHiddenStore = NO;
+    @synchronized (gHiddenChatsMap) {
+        NSString *matchedKey = nil;
+        if (gHiddenChatsMap[uid]) matchedKey = uid;
+        else if (cleanDigits.length >= 5 && gHiddenChatsMap[cleanDigits]) matchedKey = cleanDigits;
+
+        if (matchedKey || (mergedHidden && ![sUnhiddenThreadIDs containsObject:uid])) {
+            NSString *storeKey = matchedKey ?: uid;
+            NSDictionary *prev = gHiddenChatsMap[storeKey];
+            NSString *finalName = mergedName.length > 0 ? mergedName : (prev[@"rawName"] ?: @"");
+            NSString *finalMsg = mergedMsg.length > 0 ? mergedMsg : (prev[@"lastMessage"] ?: @"");
+            NSString *displayTitle = finalName.length > 0
+                ? [NSString stringWithFormat:@"%@ (ID: %@)", finalName, storeKey]
+                : [NSString stringWithFormat:@"Hội thoại ẩn cũ (ID: %@)", storeKey];
+            gHiddenChatsMap[storeKey] = @{
+                @"uid": storeKey,
+                @"rawName": finalName,
+                @"name": displayTitle,
+                @"lastMessage": finalMsg.length > 0 ? finalMsg : @"Đã giải mã từ RAM",
+                @"updatedAt": @(nowTs)
+            };
+            ZXSaveHiddenChatsStore();
+            updatedHiddenStore = YES;
+        }
+    }
+    if (updatedHiddenStore) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZXHiddenChatsUpdatedNotification" object:nil];
+        });
+    }
+}
+
+static void ZXCollectCellLabelTexts(UIView *v, NSMutableArray<NSString *> *outTexts, int depth)
+{
+    if (!v || v.hidden || v.alpha < 0.05 || depth > 4 || outTexts.count >= 4) return;
+    if ([v isKindOfClass:[UILabel class]]) {
+        NSString *t = [[(UILabel *)v text] ?: @"" stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+        if (t.length >= 2 && ![ZXScanner isGarbageChatIdentifier:t]) {
+            [outTexts addObject:t];
+        }
+    }
+    for (UIView *sub in v.subviews) {
+        ZXCollectCellLabelTexts(sub, outTexts, depth + 1);
+    }
+}
+
+/// Safely indexes a decrypted Zalo model object in RAM (ZAContact, ZAUser, ZAChat, ZAThread, search result...) into zx_resolved_profiles.json & hidden_chats.json.
 static void ZXIndexDecryptedModelObject(id obj)
 {
     if (!obj || [obj isKindOfClass:[UIView class]] || [obj isKindOfClass:[UIViewController class]]) return;
@@ -209,13 +292,13 @@ static void ZXIndexDecryptedModelObject(id obj)
         NSString *cn = NSStringFromClass([obj class]);
         if ([cn hasPrefix:@"UI"] || [cn hasPrefix:@"NS"] || [cn hasPrefix:@"_"] || [cn hasPrefix:@"ZX"]) return;
 
-        NSString *uid = ZXReadStringKVC(obj, @[@"userId", @"uid", @"threadId", @"conversationId", @"contactId", @"friendId", @"groupId", @"chatId", @"targetId", @"zaloId"]);
+        NSString *uid = ZXReadStringKVC(obj, @[@"userId", @"uid", @"threadId", @"conversationId", @"contactId", @"friendId", @"groupId", @"chatId", @"targetId", @"zaloId", @"entityId", @"peerId"]);
         if (uid.length < 4 || [ZXScanner isGarbageChatIdentifier:uid]) return;
 
-        NSString *name = ZXReadStringKVC(obj, @[@"displayName", @"dName", @"name", @"threadName", @"title", @"contactName", @"userName", @"zaloName", @"fullName", @"aliasName"]);
+        NSString *name = ZXReadStringKVC(obj, @[@"displayName", @"dName", @"name", @"threadName", @"title", @"contactName", @"userName", @"zaloName", @"fullName", @"aliasName", @"groupName"]);
         if (![ZXScanner isValidHumanDisplayName:name excludeUID:uid]) name = @"";
 
-        NSString *lastMsg = ZXReadStringKVC(obj, @[@"lastMessage", @"lastMsgText", @"snippet", @"content", @"lastMessageContent", @"message", @"text", @"subtitle", @"desc"]);
+        NSString *lastMsg = ZXReadStringKVC(obj, @[@"lastMessage", @"lastMsgText", @"snippet", @"content", @"lastMessageContent", @"lastMessageDisplay", @"message", @"text", @"subtitle", @"desc"]);
         if ([ZXScanner isGarbageChatIdentifier:lastMsg]) lastMsg = @"";
 
         BOOL isHidden = NO;
@@ -232,25 +315,40 @@ static void ZXIndexDecryptedModelObject(id obj)
             }
         }
 
-        if (name.length == 0 && lastMsg.length == 0 && !isHidden) return;
+        ZXRecordResolvedProfile(uid, name, lastMsg, isHidden);
+    } @catch (__unused NSException *e) {}
+}
 
-        ZXInitHiddenChatsStore();
-        @synchronized (gResolvedProfilesMap) {
-            NSDictionary *old = gResolvedProfilesMap[uid];
-            NSString *mergedName = name.length > 0 ? name : (old[@"name"] ?: @"");
-            NSString *mergedMsg = lastMsg.length > 0 ? lastMsg : (old[@"lastMessage"] ?: @"");
-            BOOL mergedHidden = isHidden || [old[@"isHidden"] boolValue];
-            if ([sUnhiddenThreadIDs containsObject:uid]) mergedHidden = NO;
-
-            gResolvedProfilesMap[uid] = @{
-                @"uid": uid,
-                @"name": mergedName,
-                @"lastMessage": mergedMsg,
-                @"isHidden": @(mergedHidden),
-                @"timestamp": @((long long)[[NSDate date] timeIntervalSince1970])
-            };
+static void ZXIndexModelOrCollection(id obj, int depth)
+{
+    if (!obj || depth > 2) return;
+    @try {
+        if ([obj isKindOfClass:[NSArray class]]) {
+            NSArray *arr = (NSArray *)obj;
+            NSUInteger limit = MIN(arr.count, (NSUInteger)60);
+            for (NSUInteger i = 0; i < limit; i++) {
+                ZXIndexModelOrCollection(arr[i], depth + 1);
+            }
+            return;
         }
-        ZXScheduleSaveResolvedProfiles();
+        if ([obj isKindOfClass:[NSDictionary class]]) {
+            NSDictionary *dict = (NSDictionary *)obj;
+            NSUInteger count = 0;
+            for (id val in dict.allValues) {
+                if (count++ >= 60) break;
+                ZXIndexModelOrCollection(val, depth + 1);
+            }
+            return;
+        }
+        if ([obj isKindOfClass:[NSSet class]]) {
+            NSUInteger count = 0;
+            for (id val in (NSSet *)obj) {
+                if (count++ >= 60) break;
+                ZXIndexModelOrCollection(val, depth + 1);
+            }
+            return;
+        }
+        ZXIndexDecryptedModelObject(obj);
     } @catch (__unused NSException *e) {}
 }
 
@@ -258,10 +356,67 @@ static void ZXIndexCellAndSubviews(UIView *cell)
 {
     if (!cell) return;
     @try {
-        for (NSString *prop in @[@"chatEntity", @"item", @"chatItem", @"entity", @"model", @"contact", @"user", @"thread", @"conversation", @"viewModel", @"data", @"chatObject"]) {
+        NSArray<NSString *> *modelProps = @[
+            @"chatEntity", @"item", @"chatItem", @"entity", @"model", @"contact", @"user",
+            @"thread", @"conversation", @"viewModel", @"data", @"chatObject", @"searchResult",
+            @"result", @"profile", @"cellModel", @"cellData", @"object"
+        ];
+        NSString *foundUID = @"";
+        for (NSString *prop in modelProps) {
             if ([cell respondsToSelector:NSSelectorFromString(prop)]) {
                 id model = [cell valueForKey:prop];
-                if (model) ZXIndexDecryptedModelObject(model);
+                if (!model) continue;
+                ZXIndexDecryptedModelObject(model);
+                if (foundUID.length == 0) {
+                    NSString *u = ZXReadStringKVC(model, @[@"userId", @"uid", @"threadId", @"conversationId", @"contactId", @"friendId", @"groupId", @"chatId", @"targetId", @"zaloId", @"entityId"]);
+                    if (u.length >= 4 && ![ZXScanner isGarbageChatIdentifier:u]) foundUID = u;
+                }
+                // Also inspect nested ZAContact/ZAUser/ZAThread inside viewModel/item wrappers
+                for (NSString *subProp in @[@"contact", @"user", @"thread", @"chatEntity", @"conversation", @"entity", @"item", @"model", @"profile"]) {
+                    if ([model respondsToSelector:NSSelectorFromString(subProp)]) {
+                        id subModel = [model valueForKey:subProp];
+                        if (subModel) {
+                            ZXIndexDecryptedModelObject(subModel);
+                            if (foundUID.length == 0) {
+                                NSString *u2 = ZXReadStringKVC(subModel, @[@"userId", @"uid", @"threadId", @"conversationId", @"contactId", @"friendId", @"groupId", @"chatId"]);
+                                if (u2.length >= 4 && ![ZXScanner isGarbageChatIdentifier:u2]) foundUID = u2;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // Fallback: if cell holds a model UID and displays the decrypted human name on its UILabels (e.g. Search / PIN hidden chat results)
+        if (foundUID.length >= 4) {
+            NSMutableArray<NSString *> *labels = [NSMutableArray new];
+            ZXCollectCellLabelTexts(cell, labels, 0);
+            NSString *lblName = @"";
+            NSString *lblMsg = @"";
+            for (NSString *t in labels) {
+                if (lblName.length == 0 && [ZXScanner isValidHumanDisplayName:t excludeUID:foundUID]) {
+                    lblName = t;
+                } else if (lblName.length > 0 && lblMsg.length == 0 && ![t isEqualToString:lblName]) {
+                    lblMsg = t;
+                    break;
+                }
+            }
+            if (lblName.length > 0) {
+                ZXRecordResolvedProfile(foundUID, lblName, lblMsg, NO);
+            }
+        }
+    } @catch (__unused NSException *e) {}
+}
+
+static void ZXIndexDataSourceModels(id dataSource)
+{
+    if (!dataSource) return;
+    @try {
+        NSString *cn = NSStringFromClass([dataSource class]);
+        if ([cn hasPrefix:@"ZX"] || [cn hasPrefix:@"UI"] || [cn hasPrefix:@"_"]) return;
+        for (NSString *prop in @[@"items", @"dataList", @"dataSource", @"contacts", @"conversations", @"threads", @"chats", @"hiddenChats", @"searchResults", @"results", @"filteredResults", @"users", @"entities", @"models", @"sections", @"listData", @"data"]) {
+            if ([dataSource respondsToSelector:NSSelectorFromString(prop)]) {
+                id val = [dataSource valueForKey:prop];
+                if (val) ZXIndexModelOrCollection(val, 0);
             }
         }
     } @catch (__unused NSException *e) {}
@@ -1361,7 +1516,7 @@ static void ZXInstallExtendedFeatureHooks(void)
                 }));
             }
 
-            // 2. Hook UITableViewCell -didMoveToWindow for RAM Decrypted Profile indexing + long-press quick menu
+            // 2. Hook UITableViewCell & UICollectionViewCell -didMoveToWindow + UITableView/UICollectionView -reloadData for RAM profile indexing
             Method dmw = class_getInstanceMethod([UITableViewCell class], @selector(didMoveToWindow));
             if (dmw) {
                 IMP origDMW = method_getImplementation(dmw);
@@ -1379,6 +1534,43 @@ static void ZXInstallExtendedFeatureHooks(void)
                             lp.cancelsTouchesInView = NO;
                             [self_ addGestureRecognizer:lp];
                             objc_setAssociatedObject(self_, &kLPKey, lp, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                        }
+                    } @catch (__unused NSException *e) {}
+                }));
+            }
+            Method cvCellDmw = class_getInstanceMethod([UICollectionViewCell class], @selector(didMoveToWindow));
+            if (cvCellDmw) {
+                IMP origCVDMW = method_getImplementation(cvCellDmw);
+                method_setImplementation(cvCellDmw, imp_implementationWithBlock(^(UICollectionViewCell *self_) {
+                    @try {
+                        ((void (*)(id, SEL))origCVDMW)(self_, @selector(didMoveToWindow));
+                        if (!self_.window) return;
+                        NSString *cn = NSStringFromClass([self_ class]);
+                        if ([cn hasPrefix:@"ZX"]) return;
+                        ZXIndexCellAndSubviews(self_);
+                    } @catch (__unused NSException *e) {}
+                }));
+            }
+            Method tvReload = class_getInstanceMethod([UITableView class], @selector(reloadData));
+            if (tvReload) {
+                IMP origTVReload = method_getImplementation(tvReload);
+                method_setImplementation(tvReload, imp_implementationWithBlock(^(UITableView *self_) {
+                    @try {
+                        ((void (*)(id, SEL))origTVReload)(self_, @selector(reloadData));
+                        if (self_.window && self_.dataSource) {
+                            ZXIndexDataSourceModels(self_.dataSource);
+                        }
+                    } @catch (__unused NSException *e) {}
+                }));
+            }
+            Method cvReload = class_getInstanceMethod([UICollectionView class], @selector(reloadData));
+            if (cvReload) {
+                IMP origCVReload = method_getImplementation(cvReload);
+                method_setImplementation(cvReload, imp_implementationWithBlock(^(UICollectionView *self_) {
+                    @try {
+                        ((void (*)(id, SEL))origCVReload)(self_, @selector(reloadData));
+                        if (self_.window && self_.dataSource) {
+                            ZXIndexDataSourceModels(self_.dataSource);
                         }
                     } @catch (__unused NSException *e) {}
                 }));

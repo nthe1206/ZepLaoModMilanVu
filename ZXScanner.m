@@ -59,33 +59,6 @@ static BOOL ZXIsValidHumanDisplayName(NSString *s, NSString *excludeUID)
     return YES;
 }
 
-/// Extracts readable UTF-8 strings (e.g. from serialized JSON/Protobuf/plist blobs in SQLite BLOB columns).
-static NSArray<NSString *> *ZXExtractReadableStringsFromBlob(const void *bytes, int length)
-{
-    if (!bytes || length <= 2) return @[];
-    NSMutableArray<NSString *> *out = [NSMutableArray new];
-    const uint8_t *buf = (const uint8_t *)bytes;
-    int start = -1;
-    for (int i = 0; i < length; i++) {
-        uint8_t b = buf[i];
-        BOOL printable = (b >= 32 && b != 127);
-        if (printable) {
-            if (start < 0) start = i;
-        } else {
-            if (start >= 0 && (i - start) >= 3 && (i - start) <= 200) {
-                NSString *s = [[NSString alloc] initWithBytes:(buf + start) length:(NSUInteger)(i - start) encoding:NSUTF8StringEncoding];
-                if (s.length >= 2) [out addObject:s];
-            }
-            start = -1;
-        }
-    }
-    if (start >= 0 && (length - start) >= 3 && (length - start) <= 200) {
-        NSString *s = [[NSString alloc] initWithBytes:(buf + start) length:(NSUInteger)(length - start) encoding:NSUTF8StringEncoding];
-        if (s.length >= 2) [out addObject:s];
-    }
-    return out;
-}
-
 static BOOL ZXIsSQLiteFileAtPath(NSString *path)
 {
     if (!path) return NO;
@@ -169,85 +142,6 @@ static NSString *ZXColumnText(sqlite3_stmt *stmt, int col)
     return [NSString stringWithUTF8String:(const char *)txt] ?: @"";
 }
 
-static void ZXTryParseJSONText(NSString *raw, NSString *excludeUID, NSString **ioName, NSString **ioMsg)
-{
-    if (!raw || raw.length < 4) return;
-    NSString *trim = [raw stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
-    if (![trim hasPrefix:@"{"] || ![trim hasSuffix:@"}"]) return;
-    @try {
-        NSData *d = [trim dataUsingEncoding:NSUTF8StringEncoding];
-        NSDictionary *dict = [NSJSONSerialization JSONObjectWithData:d options:0 error:nil];
-        if (![dict isKindOfClass:[NSDictionary class]]) return;
-        for (NSString *nk in @[@"displayName", @"dName", @"name", @"threadName", @"title", @"zaloName", @"fullName", @"userName", @"groupName", @"contactName"]) {
-            id v = dict[nk];
-            if ([v isKindOfClass:[NSString class]] && ZXIsValidHumanDisplayName(v, excludeUID)) {
-                if (ioName && (*ioName).length == 0) *ioName = v;
-                break;
-            }
-        }
-        for (NSString *mk in @[@"message", @"msg", @"content", @"text", @"lastMessage", @"snippet", @"desc"]) {
-            id v = dict[mk];
-            if ([v isKindOfClass:[NSString class]] && [(NSString *)v length] > 0 && !ZXIsGarbageString(v)) {
-                if (ioMsg && (*ioMsg).length == 0) *ioMsg = v;
-                break;
-            }
-        }
-    } @catch (__unused NSException *e) {}
-}
-
-/// Inspects all columns (TEXT and BLOB) of a statement row to extract the best human display name and message snippet.
-static void ZXExtractNameAndMessageFromRow(sqlite3_stmt *stmt,
-                                           NSString *uid,
-                                           NSArray<NSString *> *preferredNameCols,
-                                           NSArray<NSString *> *preferredMsgCols,
-                                           NSString **ioName,
-                                           NSString **ioMsg)
-{
-    int colCount = sqlite3_column_count(stmt);
-    // 1. Check preferred name/message columns first
-    for (int c = 0; c < colCount; c++) {
-        const char *rawCol = sqlite3_column_name(stmt, c);
-        NSString *cn = rawCol ? [NSString stringWithUTF8String:rawCol] : @"";
-        int colType = sqlite3_column_type(stmt, c);
-        if (colType == SQLITE_TEXT) {
-            NSString *val = ZXColumnText(stmt, c);
-            if (val.length == 0) continue;
-            ZXTryParseJSONText(val, uid, ioName, ioMsg);
-            if ([preferredNameCols containsObject:cn] && (*ioName).length == 0 && ZXIsValidHumanDisplayName(val, uid)) {
-                *ioName = [val stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
-            }
-            if ([preferredMsgCols containsObject:cn] && (*ioMsg).length == 0 && val.length >= 2 && !ZXIsGarbageString(val) && ![val isEqualToString:uid]) {
-                NSString *nonDigits = [val stringByTrimmingCharactersInSet:NSCharacterSet.decimalDigitCharacterSet];
-                if (nonDigits.length > 0 && ![val isEqualToString:*ioName]) {
-                    *ioMsg = [val stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
-                }
-            }
-        } else if (colType == SQLITE_BLOB) {
-            const void *blob = sqlite3_column_blob(stmt, c);
-            int bytes = sqlite3_column_bytes(stmt, c);
-            NSArray<NSString *> *strs = ZXExtractReadableStringsFromBlob(blob, bytes);
-            for (NSString *s in strs) {
-                ZXTryParseJSONText(s, uid, ioName, ioMsg);
-                if ((*ioName).length == 0 && ZXIsValidHumanDisplayName(s, uid)) {
-                    *ioName = [s stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
-                }
-            }
-        }
-    }
-
-    // 2. Fallback: scan any remaining TEXT column on the exact-matched row for a valid human display name
-    if ((*ioName).length == 0) {
-        for (int c = 0; c < colCount; c++) {
-            if (sqlite3_column_type(stmt, c) != SQLITE_TEXT) continue;
-            NSString *val = ZXColumnText(stmt, c);
-            if (ZXIsValidHumanDisplayName(val, uid)) {
-                *ioName = [val stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
-                break;
-            }
-        }
-    }
-}
-
 /// Checks if a column name is a primary entity/user/thread/group identifier (NOT senderId/ownerId/messageId).
 static BOOL ZXIsExactEntityIDColumn(NSString *colName)
 {
@@ -283,7 +177,7 @@ static BOOL ZXIsExactEntityIDColumn(NSString *colName)
             [lc isEqualToString:@"chat_id"]);
 }
 
-// Pass 1: Read HiddenChatEntity (and any table with explicit hidden chat flags)
+// Read ONLY HiddenChatEntity (and dedicated hidden-chat tables) for old hidden IDs — NEVER scrape names from other SQLite tables.
 static void ZXScanDatabaseForHiddenIDs(NSString *dbPath, NSMutableDictionary<NSString *, NSMutableDictionary *> *results)
 {
     if (!dbPath || !results) return;
@@ -301,160 +195,9 @@ static void ZXScanDatabaseForHiddenIDs(NSString *dbPath, NSMutableDictionary<NSS
         if (sqlite3_prepare_v2(db, "SELECT name FROM sqlite_master WHERE type='table'", -1, &tStmt, NULL) == SQLITE_OK) {
             while (sqlite3_step(tStmt) == SQLITE_ROW) {
                 NSString *tName = ZXColumnText(tStmt, 0);
-                if (tName.length && ![tName hasPrefix:@"sqlite_"]) [tables addObject:tName];
-            }
-        }
-        if (tStmt) sqlite3_finalize(tStmt);
-
-        for (NSString *table in tables) {
-            NSString *pragma = [NSString stringWithFormat:@"PRAGMA table_info(\"%@\")", table];
-            sqlite3_stmt *cStmt = NULL;
-            if (sqlite3_prepare_v2(db, pragma.UTF8String, -1, &cStmt, NULL) != SQLITE_OK) {
-                if (cStmt) sqlite3_finalize(cStmt);
-                continue;
-            }
-
-            NSMutableArray<NSString *> *allCols = [NSMutableArray new];
-            NSMutableArray<NSString *> *hideCols = [NSMutableArray new];
-            NSMutableArray<NSString *> *idCols = [NSMutableArray new];
-            NSMutableArray<NSString *> *nameCols = [NSMutableArray new];
-            NSMutableArray<NSString *> *msgCols = [NSMutableArray new];
-
-            while (sqlite3_step(cStmt) == SQLITE_ROW) {
-                NSString *col = ZXColumnText(cStmt, 1);
-                if (!col.length) continue;
-                [allCols addObject:col];
-                NSString *lc = col.lowercaseString;
-                if ([lc containsString:@"hidden"] || [lc containsString:@"hide"] || [lc isEqualToString:@"is_pin"] || [lc isEqualToString:@"pin_chat"]) {
-                    if (![lc containsString:@"time"] && ![lc containsString:@"date"]) {
-                        [hideCols addObject:col];
-                    }
-                }
-                if (ZXIsExactEntityIDColumn(col)) {
-                    [idCols addObject:col];
-                }
-                if ([lc containsString:@"name"] || [lc containsString:@"title"] || [lc containsString:@"alias"] || [lc containsString:@"nick"]) {
-                    [nameCols addObject:col];
-                }
-                if ([lc containsString:@"lastmsg"] || [lc containsString:@"lastmessage"] ||
-                    [lc containsString:@"snippet"] || [lc isEqualToString:@"content"] ||
-                    [lc isEqualToString:@"message"] || [lc isEqualToString:@"summary"]) {
-                    [msgCols addObject:col];
-                }
-            }
-            sqlite3_finalize(cStmt);
-
-            NSString *tlc = table.lowercaseString;
-            BOOL tableIsDedicatedHidden = ([tlc containsString:@"hiddenchat"] || [tlc containsString:@"hidechat"] || [tlc isEqualToString:@"hidden_chats"]);
-            if (hideCols.count == 0 && !tableIsDedicatedHidden) continue;
-
-            NSMutableString *whereClause = [NSMutableString new];
-            if (!tableIsDedicatedHidden && hideCols.count > 0) {
-                NSMutableArray *conds = [NSMutableArray new];
-                for (NSString *hc in hideCols) {
-                    [conds addObject:[NSString stringWithFormat:@"(\"%@\" > 0 AND \"%@\" != '0' AND \"%@\" != '')", hc, hc, hc]];
-                }
-                [whereClause appendFormat:@" WHERE %@", [conds componentsJoinedByString:@" OR "]];
-            }
-
-            NSString *query = [NSString stringWithFormat:@"SELECT * FROM \"%@\"%@ LIMIT 150", table, whereClause];
-            sqlite3_stmt *qStmt = NULL;
-            if (sqlite3_prepare_v2(db, query.UTF8String, -1, &qStmt, NULL) == SQLITE_OK) {
-                int colCount = sqlite3_column_count(qStmt);
-                while (sqlite3_step(qStmt) == SQLITE_ROW) {
-                    NSString *uid = @"";
-                    // Find UID from idCols first
-                    for (int c = 0; c < colCount; c++) {
-                        const char *rawColName = sqlite3_column_name(qStmt, c);
-                        NSString *cn = rawColName ? [NSString stringWithUTF8String:rawColName] : @"";
-                        if ([idCols containsObject:cn]) {
-                            NSString *val = [ZXColumnText(qStmt, c) stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
-                            if (val.length > 0 && !ZXIsGarbageString(val)) {
-                                uid = val;
-                                break;
-                            }
-                        }
-                    }
-                    // Fallback in dedicated HiddenChatEntity table: look for any numeric ID column (>= 5 digits)
-                    if (uid.length == 0 && tableIsDedicatedHidden) {
-                        for (int c = 0; c < colCount; c++) {
-                            NSString *val = [ZXColumnText(qStmt, c) stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
-                            NSString *rem = [val stringByTrimmingCharactersInSet:NSCharacterSet.decimalDigitCharacterSet];
-                            if (val.length >= 5 && rem.length == 0) {
-                                uid = val;
-                                break;
-                            }
-                        }
-                    }
-                    if (uid.length == 0 || ZXIsGarbageString(uid)) continue;
-
-                    NSString *name = @"";
-                    NSString *msg = @"";
-                    ZXExtractNameAndMessageFromRow(qStmt, uid, nameCols, msgCols, &name, &msg);
-
-                    NSMutableDictionary *entry = results[uid];
-                    if (!entry) {
-                        entry = [NSMutableDictionary dictionaryWithDictionary:@{
-                            @"uid": uid,
-                            @"rawName": name ?: @"",
-                            @"lastMessage": msg ?: @"",
-                            @"sourceDB": dbPath,
-                            @"sourceTable": [NSString stringWithFormat:@"%@ • %@", dbPath.lastPathComponent, table],
-                            @"updatedAt": @((long long)[[NSDate date] timeIntervalSince1970])
-                        }];
-                        results[uid] = entry;
-                    } else {
-                        if ([entry[@"rawName"] length] == 0 && name.length > 0) entry[@"rawName"] = name;
-                        if ([entry[@"lastMessage"] length] == 0 && msg.length > 0) entry[@"lastMessage"] = msg;
-                    }
-                }
-            }
-            if (qStmt) sqlite3_finalize(qStmt);
-        }
-
-        sqlite3_close(db);
-    } @catch (NSException *e) {
-        ZXLog(@"Pass 1 SQLite scan exception on %@: %@", dbPath.lastPathComponent, e.reason);
-    }
-}
-
-// Pass 2: Strict Exact-ID Cross-Reference (`WHERE col = '320193294' OR col = 320193294` — NEVER LIKE '%...%')
-static void ZXEnrichHiddenChatsInDatabase(NSString *dbPath, NSMutableDictionary<NSString *, NSMutableDictionary *> *hiddenChats)
-{
-    if (!dbPath || hiddenChats.count == 0) return;
-
-    NSMutableArray<NSString *> *targetIDs = [NSMutableArray new];
-    for (NSString *uid in hiddenChats) {
-        NSMutableDictionary *entry = hiddenChats[uid];
-        if ([entry[@"rawName"] length] == 0 || [entry[@"lastMessage"] length] == 0) {
-            [targetIDs addObject:uid];
-        }
-    }
-    if (targetIDs.count == 0) return;
-
-    @try {
-        sqlite3 *db = NULL;
-        int flags = SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX;
-        if (sqlite3_open_v2(dbPath.UTF8String, &db, flags, NULL) != SQLITE_OK || !db) {
-            if (db) sqlite3_close(db);
-            return;
-        }
-        sqlite3_busy_timeout(db, 250);
-
-        NSMutableArray<NSString *> *tables = [NSMutableArray new];
-        sqlite3_stmt *tStmt = NULL;
-        if (sqlite3_prepare_v2(db, "SELECT name FROM sqlite_master WHERE type='table'", -1, &tStmt, NULL) == SQLITE_OK) {
-            while (sqlite3_step(tStmt) == SQLITE_ROW) {
-                NSString *tName = ZXColumnText(tStmt, 0);
                 if (tName.length && ![tName hasPrefix:@"sqlite_"]) {
-                    // Prioritize Contact / User / Friend / Group / Search / Conversation tables before Message tables
                     NSString *tlc = tName.lowercaseString;
-                    if ([tlc containsString:@"contact"] || [tlc containsString:@"user"] ||
-                        [tlc containsString:@"friend"] || [tlc containsString:@"group"] ||
-                        [tlc containsString:@"profile"] || [tlc containsString:@"search"] ||
-                        [tlc containsString:@"conversation"] || [tlc containsString:@"thread"]) {
-                        [tables insertObject:tName atIndex:0];
-                    } else {
+                    if ([tlc containsString:@"hiddenchat"] || [tlc containsString:@"hidechat"] || [tlc isEqualToString:@"hidden_chats"]) {
                         [tables addObject:tName];
                     }
                 }
@@ -471,77 +214,60 @@ static void ZXEnrichHiddenChatsInDatabase(NSString *dbPath, NSMutableDictionary<
             }
 
             NSMutableArray<NSString *> *idCols = [NSMutableArray new];
-            NSMutableArray<NSString *> *nameCols = [NSMutableArray new];
-            NSMutableArray<NSString *> *msgCols = [NSMutableArray new];
-
             while (sqlite3_step(cStmt) == SQLITE_ROW) {
                 NSString *col = ZXColumnText(cStmt, 1);
-                if (!col.length) continue;
-                NSString *lc = col.lowercaseString;
-
-                if (ZXIsExactEntityIDColumn(col)) {
+                if (col.length && ZXIsExactEntityIDColumn(col)) {
                     [idCols addObject:col];
-                }
-                if ([lc containsString:@"name"] || [lc containsString:@"title"] || [lc containsString:@"alias"] ||
-                    [lc containsString:@"nick"] || [lc isEqualToString:@"keyword"] || [lc containsString:@"label"]) {
-                    [nameCols addObject:col];
-                }
-                if ([lc containsString:@"msg"] || [lc containsString:@"message"] || [lc containsString:@"content"] ||
-                    [lc containsString:@"snippet"] || [lc containsString:@"text"] || [lc containsString:@"body"] ||
-                    [lc containsString:@"summary"] || [lc containsString:@"desc"] || [lc containsString:@"subtitle"]) {
-                    [msgCols addObject:col];
                 }
             }
             sqlite3_finalize(cStmt);
 
-            if (idCols.count == 0) continue;
-
-            for (NSString *uid in targetIDs) {
-                NSMutableDictionary *entry = hiddenChats[uid];
-                BOOL needName = ([entry[@"rawName"] length] == 0);
-                BOOL needMsg = ([entry[@"lastMessage"] length] == 0);
-                if (!needName && !needMsg) continue;
-
-                NSString *cleanDigits = [[uid componentsSeparatedByCharactersInSet:
-                                         [[NSCharacterSet decimalDigitCharacterSet] invertedSet]] componentsJoinedByString:@""];
-                BOOL isNumeric = (cleanDigits.length >= 4 && [cleanDigits isEqualToString:uid]);
-
-                // Strict exact match ONLY: col = '320193294' OR col = 320193294
-                NSMutableArray<NSString *> *whereParts = [NSMutableArray new];
-                for (NSString *ic in idCols) {
-                    [whereParts addObject:[NSString stringWithFormat:@"\"%@\" = '%@'", ic, uid]];
-                    if (isNumeric) {
-                        [whereParts addObject:[NSString stringWithFormat:@"\"%@\" = %@", ic, cleanDigits]];
-                    } else if (cleanDigits.length >= 5) {
-                        [whereParts addObject:[NSString stringWithFormat:@"\"%@\" = '%@'", ic, cleanDigits]];
-                        [whereParts addObject:[NSString stringWithFormat:@"\"%@\" = %@", ic, cleanDigits]];
-                    }
-                }
-
-                NSString *sql = [NSString stringWithFormat:@"SELECT * FROM \"%@\" WHERE %@ LIMIT 3",
-                                 table, [whereParts componentsJoinedByString:@" OR "]];
-                sqlite3_stmt *qStmt = NULL;
-                if (sqlite3_prepare_v2(db, sql.UTF8String, -1, &qStmt, NULL) == SQLITE_OK) {
-                    while (sqlite3_step(qStmt) == SQLITE_ROW) {
-                        NSString *foundName = entry[@"rawName"] ?: @"";
-                        NSString *foundMsg = entry[@"lastMessage"] ?: @"";
-                        ZXExtractNameAndMessageFromRow(qStmt, uid, nameCols, msgCols, &foundName, &foundMsg);
-                        if (foundName.length > 0 && [entry[@"rawName"] length] == 0) {
-                            entry[@"rawName"] = foundName;
-                            ZXLog(@"Resolved exact name for UID %@ -> '%@' from %@.%@", uid, foundName, dbPath.lastPathComponent, table);
-                        }
-                        if (foundMsg.length > 0 && [entry[@"lastMessage"] length] == 0) {
-                            entry[@"lastMessage"] = foundMsg;
+            NSString *query = [NSString stringWithFormat:@"SELECT * FROM \"%@\" LIMIT 200", table];
+            sqlite3_stmt *qStmt = NULL;
+            if (sqlite3_prepare_v2(db, query.UTF8String, -1, &qStmt, NULL) == SQLITE_OK) {
+                int colCount = sqlite3_column_count(qStmt);
+                while (sqlite3_step(qStmt) == SQLITE_ROW) {
+                    NSString *uid = @"";
+                    for (int c = 0; c < colCount; c++) {
+                        const char *rawColName = sqlite3_column_name(qStmt, c);
+                        NSString *cn = rawColName ? [NSString stringWithUTF8String:rawColName] : @"";
+                        if ([idCols containsObject:cn]) {
+                            NSString *val = [ZXColumnText(qStmt, c) stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+                            if (val.length > 0 && !ZXIsGarbageString(val)) {
+                                uid = val;
+                                break;
+                            }
                         }
                     }
+                    if (uid.length == 0) {
+                        for (int c = 0; c < colCount; c++) {
+                            NSString *val = [ZXColumnText(qStmt, c) stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+                            NSString *rem = [val stringByTrimmingCharactersInSet:NSCharacterSet.decimalDigitCharacterSet];
+                            if (val.length >= 5 && rem.length == 0) {
+                                uid = val;
+                                break;
+                            }
+                        }
+                    }
+                    if (uid.length == 0 || ZXIsGarbageString(uid)) continue;
+
+                    if (!results[uid]) {
+                        results[uid] = [NSMutableDictionary dictionaryWithDictionary:@{
+                            @"uid": uid,
+                            @"rawName": @"",
+                            @"lastMessage": @"",
+                            @"sourceTable": [NSString stringWithFormat:@"%@ • %@", dbPath.lastPathComponent, table],
+                            @"updatedAt": @((long long)[[NSDate date] timeIntervalSince1970])
+                        }];
+                    }
                 }
-                if (qStmt) sqlite3_finalize(qStmt);
             }
+            if (qStmt) sqlite3_finalize(qStmt);
         }
 
         sqlite3_close(db);
     } @catch (NSException *e) {
-        ZXLog(@"Pass 2 SQLite enrich exception on %@: %@", dbPath.lastPathComponent, e.reason);
+        ZXLog(@"HiddenChatEntity scan exception on %@: %@", dbPath.lastPathComponent, e.reason);
     }
 }
 
@@ -606,7 +332,7 @@ static void ZXEnrichHiddenChatsInDatabase(NSString *dbPath, NSMutableDictionary<
             ZXScanDatabaseForHiddenIDs(path, found);
         }
 
-        // Overlay RAM-decrypted profile names & messages onto every discovered hidden chat ID
+        // Overlay RAM-decrypted profile names & messages ONLY from zx_resolved_profiles.json (NEVER scrape other SQLite tables)
         for (NSString *uid in found) {
             NSMutableDictionary *entry = found[uid];
             NSDictionary *prof = ramProfiles[uid];
@@ -627,23 +353,6 @@ static void ZXEnrichHiddenChatsInDatabase(NSString *dbPath, NSMutableDictionary<
             }
         }
 
-        // Pass 2: First enrich inside the same DB where each hidden chat was found (e.g. search/global.sqlite), then across all other SQLite DBs
-        if (found.count > 0) {
-            NSMutableSet<NSString *> *sourceDBs = [NSMutableSet new];
-            for (NSString *uid in found) {
-                NSString *sDB = found[uid][@"sourceDB"];
-                if (sDB.length) [sourceDBs addObject:sDB];
-            }
-            for (NSString *sDB in sourceDBs) {
-                ZXEnrichHiddenChatsInDatabase(sDB, found);
-            }
-            for (NSString *path in dbPaths) {
-                if (![sourceDBs containsObject:path]) {
-                    ZXEnrichHiddenChatsInDatabase(path, found);
-                }
-            }
-        }
-
         // Format final unambiguous display strings
         NSMutableArray<NSDictionary *> *finalList = [NSMutableArray new];
         for (NSString *uid in found) {
@@ -651,11 +360,13 @@ static void ZXEnrichHiddenChatsInDatabase(NSString *dbPath, NSMutableDictionary<
             NSString *rawName = entry[@"rawName"] ?: @"";
             NSString *displayTitle = rawName.length > 0
                 ? [NSString stringWithFormat:@"%@ (ID: %@)", rawName, uid]
-                : [NSString stringWithFormat:@"Chưa giải mã tên • ID: %@", uid];
+                : [NSString stringWithFormat:@"Hội thoại ẩn cũ (ID: %@)", uid];
             NSString *lastMsg = entry[@"lastMessage"] ?: @"";
             if (lastMsg.length == 0) {
-                NSString *src = entry[@"sourceTable"] ?: @"SQLite";
-                lastMsg = [NSString stringWithFormat:@"Tìm thấy trong %@", src];
+                NSString *src = entry[@"sourceTable"] ?: @"HiddenChatEntity";
+                lastMsg = rawName.length > 0
+                    ? [NSString stringWithFormat:@"Đã giải mã từ RAM • %@", src]
+                    : [NSString stringWithFormat:@"%@ • Nhập PIN ẩn ở Tìm kiếm Zalo để giải mã tên thật", src];
             }
             [finalList addObject:@{
                 @"uid": uid,
@@ -666,7 +377,7 @@ static void ZXEnrichHiddenChatsInDatabase(NSString *dbPath, NSMutableDictionary<
             }];
         }
 
-        ZXLog(@"SQLite+RAM exact-match scan inspected %lu DBs (%lu RAM profiles), resolved %lu hidden chats",
+        ZXLog(@"HiddenChatEntity + RAM profile lookup inspected %lu DBs (%lu RAM profiles), resolved %lu hidden chats",
               (unsigned long)dbPaths.count, (unsigned long)ramProfiles.count, (unsigned long)finalList.count);
         return finalList;
     } @catch (NSException *e) {
