@@ -21,7 +21,7 @@ static NSMutableSet<NSString *> *gUnlockedSessionChats;
 static NSURL *gLastVoiceURL;
 static AVAudioRecorder *gCallRecorder;
 static AVAudioPlayer *gSilentBgPlayer;
-static UIBackgroundTaskIdentifier gBgTask = UIBackgroundTaskInvalid;
+static UIBackgroundTaskIdentifier gBgTask = 0;
 static __weak UIViewController *gActiveChatVC;
 static __weak UIView *sActiveInputView;
 static UIWindow *gSpamOverlayWindow;
@@ -120,6 +120,7 @@ static void ZXInitHiddenChatsStore(void)
 {
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
+        gBgTask = UIBackgroundTaskInvalid;
         gHiddenChatsMap = [NSMutableDictionary new];
         gResolvedProfilesMap = [NSMutableDictionary new];
         gUnlockedSessionChats = [NSMutableSet new];
@@ -309,7 +310,7 @@ static void ZXStopBackgroundKeepAlive(void)
             [gSilentBgPlayer stop];
             gSilentBgPlayer = nil;
         }
-        if (gBgTask != UIBackgroundTaskInvalid) {
+        if (gBgTask != 0 && gBgTask != UIBackgroundTaskInvalid) {
             [[UIApplication sharedApplication] endBackgroundTask:gBgTask];
             gBgTask = UIBackgroundTaskInvalid;
         }
@@ -324,10 +325,10 @@ static void ZXStartBackgroundKeepAlive(void)
             return;
         }
         UIApplication *app = [UIApplication sharedApplication];
-        if (gBgTask == UIBackgroundTaskInvalid) {
+        if (gBgTask == 0 || gBgTask == UIBackgroundTaskInvalid) {
             gBgTask = [app beginBackgroundTaskWithName:@"thanhthe_keep_alive" expirationHandler:^{
                 @try {
-                    if (gBgTask != UIBackgroundTaskInvalid) {
+                    if (gBgTask != 0 && gBgTask != UIBackgroundTaskInvalid) {
                         [app endBackgroundTask:gBgTask];
                         gBgTask = UIBackgroundTaskInvalid;
                     }
