@@ -29,6 +29,15 @@ static UIButton *gKeyboardSpamButton;
 static CGFloat gLastKeyboardTopY;
 static BOOL gSQLiteScanInProgress;
 
+// Hide-chat real name capture state (Cách 1: Swipe/LongPress, Cách 2: Chat Options Switch)
+static NSString *sCandidateChatName;
+static NSString *sCandidateLastMsg;
+static NSString *sCandidateChatUID;
+static NSString *sCurrentOpenChatName;
+static NSString *sCurrentOpenChatUID;
+static NSSet<NSString *> *sHiddenIDsBeforeAction;
+static NSMutableSet<NSString *> *sSwizzledTableDelegates;
+
 // Spam state
 static BOOL gSpamRunning;
 static BOOL sSpamAntiDuplicate = YES;
@@ -418,6 +427,283 @@ static void ZXIndexDataSourceModels(id dataSource)
                 id val = [dataSource valueForKey:prop];
                 if (val) ZXIndexModelOrCollection(val, 0);
             }
+        }
+    } @catch (__unused NSException *e) {}
+}
+
+// ---- Hide-Chat Real Name Capture (Cách 1: Swipe/LongPress & Cách 2: Chat Options Switch) ----
+
+static BOOL ZXIsLikelyTimestampOrBadge(NSString *text)
+{
+    if (text.length == 0) return YES;
+    NSString *lc = text.lowercaseString;
+    if (text.length <= 5 && ([lc containsString:@":"] || [lc hasSuffix:@"p"] || [lc hasSuffix:@"g"] || [lc hasSuffix:@"+"])) {
+        return YES;
+    }
+    if ([lc hasSuffix:@" phút"] || [lc hasSuffix:@" giờ"] || [lc hasSuffix:@" ngày"] ||
+        [lc isEqualToString:@"vừa xong"] || [lc isEqualToString:@"hôm qua"] || [lc isEqualToString:@"yesterday"]) {
+        return YES;
+    }
+    return NO;
+}
+
+static void ZXCollectRankedLabels(UIView *v, NSMutableArray<UILabel *> *outLabels, int depth)
+{
+    if (!v || v.hidden || v.alpha < 0.05 || depth > 5 || outLabels.count >= 16) return;
+    if ([v isKindOfClass:[UILabel class]]) {
+        UILabel *lbl = (UILabel *)v;
+        NSString *t = [lbl.text ?: @"" stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+        if (t.length >= 2 && !ZXIsLikelyTimestampOrBadge(t) && ![ZXScanner isGarbageChatIdentifier:t]) {
+            [outLabels addObject:lbl];
+        }
+    }
+    for (UIView *sub in v.subviews) {
+        ZXCollectRankedLabels(sub, outLabels, depth + 1);
+    }
+}
+
+static void ZXCaptureCandidateFromCell(UIView *cell)
+{
+    if (!cell) return;
+    @try {
+        NSString *foundUID = @"";
+        for (NSString *prop in @[@"chatEntity", @"item", @"chatItem", @"entity", @"model", @"contact", @"user", @"thread", @"conversation", @"viewModel", @"data", @"chatObject"]) {
+            if ([cell respondsToSelector:NSSelectorFromString(prop)]) {
+                id m = [cell valueForKey:prop];
+                if (!m) continue;
+                NSString *u = ZXReadStringKVC(m, @[@"userId", @"uid", @"threadId", @"conversationId", @"contactId", @"friendId", @"groupId", @"chatId", @"targetId", @"zaloId"]);
+                if (u.length >= 4 && ![ZXScanner isGarbageChatIdentifier:u]) {
+                    foundUID = u;
+                    break;
+                }
+            }
+        }
+
+        NSMutableArray<UILabel *> *labels = [NSMutableArray new];
+        ZXCollectRankedLabels(cell, labels, 0);
+        // Sort prominent title label first: larger font size, then higher vertical position
+        [labels sortUsingComparator:^NSComparisonResult(UILabel *a, UILabel *b) {
+            CGFloat fa = a.font ? a.font.pointSize : 14.0;
+            CGFloat fb = b.font ? b.font.pointSize : 14.0;
+            if (fabs(fa - fb) >= 0.8) return (fa > fb) ? NSOrderedAscending : NSOrderedDescending;
+            CGFloat ya = [a convertPoint:CGPointZero toView:cell].y;
+            CGFloat yb = [b convertPoint:CGPointZero toView:cell].y;
+            return (ya < yb) ? NSOrderedAscending : NSOrderedDescending;
+        }];
+
+        NSString *candName = @"";
+        NSString *candMsg = @"";
+        for (UILabel *lbl in labels) {
+            NSString *t = [lbl.text ?: @"" stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+            if (candName.length == 0 && [ZXScanner isValidHumanDisplayName:t excludeUID:foundUID]) {
+                candName = t;
+            } else if (candName.length > 0 && candMsg.length == 0 && ![t isEqualToString:candName]) {
+                candMsg = t;
+                break;
+            }
+        }
+
+        if (candName.length > 0) {
+            sCandidateChatName = candName;
+            sCandidateLastMsg = candMsg;
+            sCandidateChatUID = foundUID;
+            ZXLog(@"Captured swipe/longpress candidate: '%@' (uid=%@)", candName, foundUID);
+
+            // Take a fast snapshot of existing HiddenChatEntity IDs before the user taps Hide
+            dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+                NSArray<NSString *> *ids = [ZXScanner currentHiddenChatEntityIDs];
+                sHiddenIDsBeforeAction = [NSSet setWithArray:ids ?: @[]];
+            });
+        }
+    } @catch (__unused NSException *e) {}
+}
+
+static BOOL ZXTextIndicatesHideAction(NSString *raw)
+{
+    if (raw.length == 0) return NO;
+    NSString *lc = [raw stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet].lowercaseString;
+    if ([lc containsString:@"bỏ ẩn"] || [lc containsString:@"unhide"] || [lc containsString:@"hiện lại"] || [lc containsString:@"tạm hiện"]) {
+        return NO;
+    }
+    return ([lc isEqualToString:@"ẩn"] ||
+            [lc isEqualToString:@"hide"] ||
+            [lc containsString:@"ẩn trò chuyện"] ||
+            [lc containsString:@"ẩn hội thoại"] ||
+            [lc containsString:@"ẩn chat"] ||
+            [lc containsString:@"hide conversation"] ||
+            [lc containsString:@"hide chat"]);
+}
+
+static BOOL ZXViewContainsHideText(UIView *v, int depth)
+{
+    if (!v || v.hidden || v.alpha < 0.05 || depth > 5) return NO;
+    if (ZXTextIndicatesHideAction(v.accessibilityLabel)) return YES;
+    if ([v isKindOfClass:[UILabel class]] && ZXTextIndicatesHideAction([(UILabel *)v text])) return YES;
+    if ([v isKindOfClass:[UIButton class]] && ZXTextIndicatesHideAction([(UIButton *)v currentTitle])) return YES;
+    for (UIView *sub in v.subviews) {
+        if (ZXViewContainsHideText(sub, depth + 1)) return YES;
+    }
+    return NO;
+}
+
+static void ZXCommitHideChatWithName(NSString *chatName, NSString *lastMsg, NSString *knownUID)
+{
+    @try {
+        NSString *cleanName = [chatName ?: @"" stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+        if (![ZXScanner isValidHumanDisplayName:cleanName excludeUID:knownUID]) return;
+        NSString *cleanMsg = [lastMsg ?: @"" stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+        if ([ZXScanner isGarbageChatIdentifier:cleanMsg]) cleanMsg = @"";
+
+        ZXLog(@"Commit hide chat detected: name='%@' knownUID='%@'", cleanName, knownUID ?: @"");
+
+        if (knownUID.length >= 4 && ![ZXScanner isGarbageChatIdentifier:knownUID]) {
+            ZXRecordResolvedProfile(knownUID, cleanName, cleanMsg, YES);
+        }
+
+        NSSet<NSString *> *beforeSnap = sHiddenIDsBeforeAction;
+        // Poll HiddenChatEntity twice (0.6s and 1.8s) to catch the newly inserted ID after Zalo writes SQLite / PIN confirmation
+        for (NSNumber *delaySec in @[@0.6, @1.8]) {
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delaySec.doubleValue * NSEC_PER_SEC)),
+                           dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+                @try {
+                    NSArray<NSString *> *afterIDs = [ZXScanner currentHiddenChatEntityIDs];
+                    NSString *matchedNewID = nil;
+                    for (NSString *cid in afterIDs) {
+                        if (beforeSnap && ![beforeSnap containsObject:cid]) {
+                            matchedNewID = cid;
+                            break;
+                        }
+                    }
+                    // Fallback: if no diff snapshot was available yet, check if there is an unresolved ID in HiddenChatEntity
+                    if (!matchedNewID && (!beforeSnap || beforeSnap.count == 0)) {
+                        ZXInitHiddenChatsStore();
+                        @synchronized (gResolvedProfilesMap) {
+                            for (NSString *cid in afterIDs) {
+                                NSDictionary *p = gResolvedProfilesMap[cid];
+                                if (!p || [p[@"name"] length] == 0) {
+                                    matchedNewID = cid;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    if (matchedNewID.length >= 4) {
+                        ZXRecordResolvedProfile(matchedNewID, cleanName, cleanMsg, YES);
+                        sHiddenIDsBeforeAction = [NSSet setWithArray:afterIDs ?: @[]];
+                        ZXLog(@"Mapped newly hidden ID %@ -> '%@'", matchedNewID, cleanName);
+                    }
+                } @catch (__unused NSException *e) {}
+            });
+        }
+    } @catch (__unused NSException *e) {}
+}
+
+static NSString *ZXExtractChatTitleFromVC(UIViewController *vc)
+{
+    if (!vc) return @"";
+    @try {
+        NSString *t1 = [vc.navigationItem.title ?: @"" stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+        if ([ZXScanner isValidHumanDisplayName:t1 excludeUID:nil]) return t1;
+
+        NSString *t2 = [vc.title ?: @"" stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+        if ([ZXScanner isValidHumanDisplayName:t2 excludeUID:nil]) return t2;
+
+        if (vc.navigationItem.titleView) {
+            NSMutableArray<UILabel *> *tvLabels = [NSMutableArray new];
+            ZXCollectRankedLabels(vc.navigationItem.titleView, tvLabels, 0);
+            for (UILabel *lbl in tvLabels) {
+                NSString *t = [lbl.text ?: @"" stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+                if ([ZXScanner isValidHumanDisplayName:t excludeUID:nil]) return t;
+            }
+        }
+
+        // Fallback: inspect top custom header bar (y < 120pt) inside chat VC's view
+        if (vc.view) {
+            NSMutableArray<UILabel *> *topLabels = [NSMutableArray new];
+            ZXCollectRankedLabels(vc.view, topLabels, 0);
+            for (UILabel *lbl in topLabels) {
+                CGRect r = [lbl convertRect:lbl.bounds toView:vc.view];
+                if (r.origin.y >= 16.0 && r.origin.y <= 115.0) {
+                    NSString *t = [lbl.text ?: @"" stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+                    if ([ZXScanner isValidHumanDisplayName:t excludeUID:nil]) return t;
+                }
+            }
+        }
+    } @catch (__unused NSException *e) {}
+    return @"";
+}
+
+static void ZXCaptureOpenChatInfo(UIViewController *vc)
+{
+    if (!vc) return;
+    @try {
+        NSString *clsName = NSStringFromClass([vc class]);
+        if ([clsName hasPrefix:@"ZX"] || [clsName hasPrefix:@"UI"] || [clsName hasPrefix:@"_"]) return;
+        BOOL looksLikeChat = ([clsName rangeOfString:@"Chat" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+                              [clsName rangeOfString:@"CSC" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+                              [clsName rangeOfString:@"MessageView" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+                              [clsName rangeOfString:@"Conversation" options:NSCaseInsensitiveSearch].location != NSNotFound);
+        BOOL looksLikeOptions = ([clsName rangeOfString:@"Option" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+                                 [clsName rangeOfString:@"Setting" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+                                 [clsName rangeOfString:@"Info" options:NSCaseInsensitiveSearch].location != NSNotFound);
+        if (!looksLikeChat || looksLikeOptions) return;
+
+        NSString *uid = ZXReadStringKVC(vc, @[@"threadId", @"chatId", @"targetUserId", @"conversationId", @"userId", @"peerId", @"groupId"]);
+        NSString *name = ZXExtractChatTitleFromVC(vc);
+        if (name.length > 0) {
+            sCurrentOpenChatName = name;
+            if (uid.length >= 4 && ![ZXScanner isGarbageChatIdentifier:uid]) {
+                sCurrentOpenChatUID = uid;
+                ZXRecordResolvedProfile(uid, name, @"", NO);
+            }
+            ZXLog(@"Captured open chat info: '%@' (uid=%@)", name, uid ?: @"");
+            dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+                NSArray<NSString *> *ids = [ZXScanner currentHiddenChatEntityIDs];
+                sHiddenIDsBeforeAction = [NSSet setWithArray:ids ?: @[]];
+            });
+        }
+    } @catch (__unused NSException *e) {}
+}
+
+static void ZXSwizzleTableViewDelegateClassIfNeeded(id delegate)
+{
+    if (!delegate) return;
+    @try {
+        Class cls = [delegate class];
+        NSString *clsName = NSStringFromClass(cls);
+        if (!clsName || [clsName hasPrefix:@"ZX"] || [clsName hasPrefix:@"UI"] || [clsName hasPrefix:@"_"]) return;
+        if (!sSwizzledTableDelegates) sSwizzledTableDelegates = [NSMutableSet new];
+        @synchronized (sSwizzledTableDelegates) {
+            if ([sSwizzledTableDelegates containsObject:clsName]) return;
+            [sSwizzledTableDelegates addObject:clsName];
+        }
+
+        // Hook trailingSwipeActionsConfigurationForRowAtIndexPath:
+        SEL selTrail = @selector(tableView:trailingSwipeActionsConfigurationForRowAtIndexPath:);
+        Method mTrail = class_getInstanceMethod(cls, selTrail);
+        if (mTrail) {
+            IMP origTrail = method_getImplementation(mTrail);
+            method_setImplementation(mTrail, imp_implementationWithBlock(^id(id self_, UITableView *tv, NSIndexPath *ip) {
+                @try {
+                    UITableViewCell *cell = [tv cellForRowAtIndexPath:ip];
+                    if (cell) ZXCaptureCandidateFromCell(cell);
+                } @catch (__unused NSException *e) {}
+                return ((id (*)(id, SEL, UITableView *, NSIndexPath *))origTrail)(self_, selTrail, tv, ip);
+            }));
+        }
+
+        // Hook editActionsForRowAtIndexPath:
+        SEL selEdit = @selector(tableView:editActionsForRowAtIndexPath:);
+        Method mEdit = class_getInstanceMethod(cls, selEdit);
+        if (mEdit) {
+            IMP origEdit = method_getImplementation(mEdit);
+            method_setImplementation(mEdit, imp_implementationWithBlock(^id(id self_, UITableView *tv, NSIndexPath *ip) {
+                @try {
+                    UITableViewCell *cell = [tv cellForRowAtIndexPath:ip];
+                    if (cell) ZXCaptureCandidateFromCell(cell);
+                } @catch (__unused NSException *e) {}
+                return ((id (*)(id, SEL, UITableView *, NSIndexPath *))origEdit)(self_, selEdit, tv, ip);
+            }));
         }
     } @catch (__unused NSException *e) {}
 }
@@ -1357,6 +1643,7 @@ static void ZXShowOrUpdateSpamOverlayButton(CGFloat keyboardTopY)
         if (g.state != UIGestureRecognizerStateBegan) return;
         UIView *cell = g.view;
         if (!cell) return;
+        ZXCaptureCandidateFromCell(cell);
 
         NSMutableArray<NSString *> *texts = [NSMutableArray new];
         for (UIView *sub in cell.subviews) {
@@ -1499,7 +1786,7 @@ static void ZXInstallExtendedFeatureHooks(void)
             [nc addObserver:[ZXUIRuntimeHelper class] selector:@selector(onAppDidEnterBackground:) name:UIApplicationDidEnterBackgroundNotification object:nil];
             [nc addObserver:[ZXUIRuntimeHelper class] selector:@selector(onAppWillEnterForeground:) name:UIApplicationWillEnterForegroundNotification object:nil];
 
-            // 1. Hook UIViewController -viewDidAppear: for Chat Lock & tracking active chat VC
+            // 1. Hook UIViewController -viewDidAppear: & UINavigationController -pushViewController:animated: for Chat Lock & Cách 2 Open Chat Title Capture
             Method vda = class_getInstanceMethod([UIViewController class], @selector(viewDidAppear:));
             if (vda) {
                 IMP origVDA = method_getImplementation(vda);
@@ -1509,10 +1796,96 @@ static void ZXInstallExtendedFeatureHooks(void)
                         if ([NSStringFromClass([self_ class]) hasPrefix:@"ZX"] && gSpamOverlayWindow) {
                             gSpamOverlayWindow.hidden = YES;
                         }
+                        ZXCaptureOpenChatInfo(self_);
                         ZXAttachLockShieldIfNeeded(self_);
                     } @catch (NSException *e) {
                         ZXLog(@"viewDidAppear hook exception: %@", e.reason);
                     }
+                }));
+            }
+            Method navPush = class_getInstanceMethod([UINavigationController class], @selector(pushViewController:animated:));
+            if (navPush) {
+                IMP origNavPush = method_getImplementation(navPush);
+                method_setImplementation(navPush, imp_implementationWithBlock(^(UINavigationController *self_, UIViewController *vc, BOOL animated) {
+                    @try {
+                        ZXCaptureOpenChatInfo(self_.topViewController);
+                        ZXCaptureOpenChatInfo(vc);
+                    } @catch (__unused NSException *e) {}
+                    ((void (*)(id, SEL, UIViewController *, BOOL))origNavPush)(self_, @selector(pushViewController:animated:), vc, animated);
+                }));
+            }
+
+            // 1b. Hook UITableView -setDelegate:, UIContextualAction, UIAlertAction, and UIControl -sendAction:to:forEvent: for Cách 1 & Cách 2 Hide Detection
+            Method tvSetDel = class_getInstanceMethod([UITableView class], @selector(setDelegate:));
+            if (tvSetDel) {
+                IMP origTVSetDel = method_getImplementation(tvSetDel);
+                method_setImplementation(tvSetDel, imp_implementationWithBlock(^(UITableView *self_, id delegate) {
+                    ((void (*)(id, SEL, id))origTVSetDel)(self_, @selector(setDelegate:), delegate);
+                    @try {
+                        if (delegate) ZXSwizzleTableViewDelegateClassIfNeeded(delegate);
+                    } @catch (__unused NSException *e) {}
+                }));
+            }
+            if (@available(iOS 11.0, *)) {
+                Method ctxAct = class_getClassMethod([UIContextualAction class], @selector(contextualActionWithStyle:title:handler:));
+                if (ctxAct) {
+                    IMP origCtxAct = method_getImplementation(ctxAct);
+                    method_setImplementation(ctxAct, imp_implementationWithBlock(^id(id self_, UIContextualActionStyle style, NSString *title, UIContextualActionHandler handler) {
+                        UIContextualActionHandler wrapped = handler;
+                        if (ZXTextIndicatesHideAction(title) && handler) {
+                            wrapped = ^(UIContextualAction *action, UIView *sourceView, void (^completionHandler)(BOOL)) {
+                                @try {
+                                    ZXCommitHideChatWithName(sCandidateChatName ?: sCurrentOpenChatName, sCandidateLastMsg, sCandidateChatUID ?: sCurrentOpenChatUID);
+                                } @catch (__unused NSException *e) {}
+                                handler(action, sourceView, completionHandler);
+                            };
+                        }
+                        return ((id (*)(id, SEL, UIContextualActionStyle, NSString *, UIContextualActionHandler))origCtxAct)(self_, @selector(contextualActionWithStyle:title:handler:), style, title, wrapped);
+                    }));
+                }
+            }
+            Method alertAct = class_getClassMethod([UIAlertAction class], @selector(actionWithTitle:style:handler:));
+            if (alertAct) {
+                IMP origAlertAct = method_getImplementation(alertAct);
+                method_setImplementation(alertAct, imp_implementationWithBlock(^id(id self_, NSString *title, UIAlertActionStyle style, void (^handler)(UIAlertAction *)) {
+                    void (^wrapped)(UIAlertAction *) = handler;
+                    if (ZXTextIndicatesHideAction(title)) {
+                        wrapped = ^(UIAlertAction *act) {
+                            @try {
+                                ZXCommitHideChatWithName(sCandidateChatName ?: sCurrentOpenChatName, sCandidateLastMsg, sCandidateChatUID ?: sCurrentOpenChatUID);
+                            } @catch (__unused NSException *e) {}
+                            if (handler) handler(act);
+                        };
+                    }
+                    return ((id (*)(id, SEL, NSString *, UIAlertActionStyle, void (^)(UIAlertAction *)))origAlertAct)(self_, @selector(actionWithTitle:style:handler:), title, style, wrapped);
+                }));
+            }
+            Method ctrlSend = class_getInstanceMethod([UIControl class], @selector(sendAction:to:forEvent:));
+            if (ctrlSend) {
+                IMP origCtrlSend = method_getImplementation(ctrlSend);
+                method_setImplementation(ctrlSend, imp_implementationWithBlock(^(UIControl *self_, SEL action, id target, UIEvent *event) {
+                    @try {
+                        UIViewController *ownerVC = ZXNearestViewControllerForView(self_);
+                        NSString *vcCls = ownerVC ? NSStringFromClass([ownerVC class]) : @"";
+                        if (![vcCls hasPrefix:@"ZX"]) {
+                            if ([self_ isKindOfClass:[UISwitch class]] && [(UISwitch *)self_ isOn]) {
+                                // Check parent cell or row container for "Ẩn trò chuyện" / "Hide"
+                                UIView *container = self_.superview;
+                                for (int up = 0; up < 4 && container; up++) {
+                                    if ([container isKindOfClass:[UITableViewCell class]] || [container isKindOfClass:[UICollectionViewCell class]]) break;
+                                    container = container.superview;
+                                }
+                                if (container && ZXViewContainsHideText(container, 0)) {
+                                    ZXCommitHideChatWithName(sCurrentOpenChatName ?: sCandidateChatName, @"", sCurrentOpenChatUID ?: sCandidateChatUID);
+                                }
+                            } else if ([self_ isKindOfClass:[UIButton class]]) {
+                                if (ZXViewContainsHideText(self_, 0)) {
+                                    ZXCommitHideChatWithName(sCandidateChatName ?: sCurrentOpenChatName, sCandidateLastMsg, sCandidateChatUID ?: sCurrentOpenChatUID);
+                                }
+                            }
+                        }
+                    } @catch (__unused NSException *e) {}
+                    ((void (*)(id, SEL, SEL, id, UIEvent *))origCtrlSend)(self_, @selector(sendAction:to:forEvent:), action, target, event);
                 }));
             }
 

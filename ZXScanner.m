@@ -18,10 +18,19 @@ static BOOL ZXIsGarbageString(NSString *s)
         @"datasource", @"manager", @"controller", @"presenter", @"viewmodel",
         @"helper", @"processor", @"entity", @"config", @"layout", @"adapter",
         @"sqlite_master", @"sqlite_sequence", @"http://", @"https://",
-        @"/var/", @"/private/", @"/library/", @"/documents/", @".png", @".jpg", @".sqlite"
+        @"/var/", @"/private/", @"/library/", @"/documents/", @".png", @".jpg", @".sqlite",
+        @"coca", @"bulla"
     ];
     for (NSString *bad in badSubstrings) {
         if ([lc containsString:bad]) return YES;
+    }
+    NSArray<NSString *> *uiTitles = @[
+        @"tùy chọn", @"cài đặt", @"ẩn trò chuyện", @"ẩn hội thoại", @"tin nhắn",
+        @"danh bạ", @"khám phá", @"nhật ký", @"cá nhân", @"tìm kiếm",
+        @"thông tin", @"options", @"settings", @"messages", @"contacts", @"search"
+    ];
+    for (NSString *t in uiTitles) {
+        if ([lc isEqualToString:t]) return YES;
     }
     if (([trim hasPrefix:@"ZA"] || [trim hasPrefix:@"UI"] || [trim hasPrefix:@"NS"] ||
          [trim hasPrefix:@"ZX"] || [trim hasPrefix:@"ZDS"] || [trim hasPrefix:@"UX"] ||
@@ -291,6 +300,20 @@ static void ZXScanDatabaseForHiddenIDs(NSString *dbPath, NSMutableDictionary<NSS
 + (NSString *)resolvedProfilesPath
 {
     return [[ZXConfig dataDir] stringByAppendingPathComponent:@"zx_resolved_profiles.json"];
+}
+
++ (NSArray<NSString *> *)currentHiddenChatEntityIDs
+{
+    NSMutableDictionary<NSString *, NSMutableDictionary *> *found = [NSMutableDictionary new];
+    @try {
+        NSArray<NSString *> *dbPaths = ZXAllZaloSQLitePaths();
+        for (NSString *path in dbPaths) {
+            ZXScanDatabaseForHiddenIDs(path, found);
+        }
+    } @catch (NSException *e) {
+        ZXLog(@"currentHiddenChatEntityIDs exception: %@", e.reason);
+    }
+    return found.allKeys ?: @[];
 }
 
 + (NSArray<NSDictionary *> *)scanSQLiteForHiddenChats
