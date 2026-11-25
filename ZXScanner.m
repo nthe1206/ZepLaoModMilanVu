@@ -19,7 +19,8 @@ static BOOL ZXIsGarbageString(NSString *s)
         @"helper", @"processor", @"entity", @"config", @"layout", @"adapter",
         @"sqlite_master", @"sqlite_sequence", @"http://", @"https://",
         @"/var/", @"/private/", @"/library/", @"/documents/", @".png", @".jpg", @".sqlite",
-        @"coca", @"bulla"
+        @"coca", @"bulla", @"hội thoại ẩn cũ", @"chưa giải mã", @"không tìm thấy",
+        @"kết quả tìm kiếm", @"nhập mã pin", @"chưa có tin nhắn"
     ];
     for (NSString *bad in badSubstrings) {
         if ([lc containsString:bad]) return YES;
@@ -27,7 +28,8 @@ static BOOL ZXIsGarbageString(NSString *s)
     NSArray<NSString *> *uiTitles = @[
         @"tùy chọn", @"cài đặt", @"ẩn trò chuyện", @"ẩn hội thoại", @"tin nhắn",
         @"danh bạ", @"khám phá", @"nhật ký", @"cá nhân", @"tìm kiếm",
-        @"thông tin", @"options", @"settings", @"messages", @"contacts", @"search"
+        @"thông tin", @"liên hệ", @"trò chuyện ẩn", @"mã pin",
+        @"options", @"settings", @"messages", @"contacts", @"search"
     ];
     for (NSString *t in uiTitles) {
         if ([lc isEqualToString:t]) return YES;
@@ -299,6 +301,10 @@ static void ZXScanDatabaseForHiddenIDs(NSString *dbPath, NSMutableDictionary<NSS
 
 + (NSString *)resolvedProfilesPath
 {
+    NSString *docs = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
+    if (docs.length > 0) {
+        return [docs stringByAppendingPathComponent:@"zx_resolved_profiles.json"];
+    }
     return [[ZXConfig dataDir] stringByAppendingPathComponent:@"zx_resolved_profiles.json"];
 }
 
@@ -320,19 +326,24 @@ static void ZXScanDatabaseForHiddenIDs(NSString *dbPath, NSMutableDictionary<NSS
 {
     NSMutableDictionary<NSString *, NSMutableDictionary *> *found = [NSMutableDictionary new];
     @try {
-        // Load RAM-indexed decrypted profiles from zx_resolved_profiles.json
-        NSDictionary<NSString *, NSDictionary *> *ramProfiles = @{};
-        NSData *ramData = [NSData dataWithContentsOfFile:[self resolvedProfilesPath]];
-        if (ramData) {
-            id obj = [NSJSONSerialization JSONObjectWithData:ramData options:0 error:nil];
-            if ([obj isKindOfClass:[NSDictionary class]]) {
-                ramProfiles = (NSDictionary *)obj;
+        // Load RAM-indexed decrypted profiles from Documents/zx_resolved_profiles.json (plus legacy ZaloXposed dir if any)
+        NSMutableDictionary<NSString *, id> *ramProfiles = [NSMutableDictionary new];
+        NSString *legacyPath = [[ZXConfig dataDir] stringByAppendingPathComponent:@"zx_resolved_profiles.json"];
+        NSString *primaryPath = [self resolvedProfilesPath];
+        for (NSString *p in @[legacyPath, primaryPath]) {
+            if (p.length == 0) continue;
+            NSData *d = [NSData dataWithContentsOfFile:p];
+            if (d) {
+                id obj = [NSJSONSerialization JSONObjectWithData:d options:0 error:nil];
+                if ([obj isKindOfClass:[NSDictionary class]]) {
+                    [ramProfiles addEntriesFromDictionary:(NSDictionary *)obj];
+                }
             }
         }
 
-        // Include any profile that was flagged as hidden directly in RAM
-        for (NSString *uid in ramProfiles) {
-            if (ZXIsGarbageString(uid)) continue;
+        // Include any profile that was flagged as hidden directly in RAM (skipping internal metadata keys starting with '_')
+        for (NSString *uid in ramProfiles.allKeys) {
+            if ([uid hasPrefix:@"_"] || ZXIsGarbageString(uid)) continue;
             NSDictionary *prof = ramProfiles[uid];
             if (![prof isKindOfClass:[NSDictionary class]]) continue;
             if ([prof[@"isHidden"] boolValue]) {
@@ -350,29 +361,90 @@ static void ZXScanDatabaseForHiddenIDs(NSString *dbPath, NSMutableDictionary<NSS
 
         NSArray<NSString *> *dbPaths = ZXAllZaloSQLitePaths();
 
-        // Pass 1: Discover all hidden chat IDs from HiddenChatEntity & hidden columns
+        // Read all hidden chat IDs from HiddenChatEntity (search/global.sqlite)
         for (NSString *path in dbPaths) {
             ZXScanDatabaseForHiddenIDs(path, found);
         }
 
-        // Overlay RAM-decrypted profile names & messages ONLY from zx_resolved_profiles.json (NEVER scrape other SQLite tables)
+        // 1. Priority lookup by exact ID in zx_resolved_profiles.json
+        NSMutableSet<NSString *> *assignedNames = [NSMutableSet new];
+        NSMutableArray<NSString *> *unresolvedUIDs = [NSMutableArray new];
         for (NSString *uid in found) {
             NSMutableDictionary *entry = found[uid];
-            NSDictionary *prof = ramProfiles[uid];
+            NSDictionary *prof = [ramProfiles[uid] isKindOfClass:[NSDictionary class]] ? ramProfiles[uid] : nil;
             if (!prof) {
                 NSString *cleanDigits = [[uid componentsSeparatedByCharactersInSet:
                                          [[NSCharacterSet decimalDigitCharacterSet] invertedSet]] componentsJoinedByString:@""];
-                if (cleanDigits.length >= 5) prof = ramProfiles[cleanDigits];
+                if (cleanDigits.length >= 5 && [ramProfiles[cleanDigits] isKindOfClass:[NSDictionary class]]) {
+                    prof = ramProfiles[cleanDigits];
+                }
             }
-            if ([prof isKindOfClass:[NSDictionary class]]) {
+            if (prof) {
                 NSString *pName = [prof[@"name"] description] ?: @"";
                 NSString *pMsg = [prof[@"lastMessage"] description] ?: @"";
                 if (ZXIsValidHumanDisplayName(pName, uid)) {
                     entry[@"rawName"] = pName;
+                    [assignedNames addObject:pName];
                 }
                 if (pMsg.length > 0 && !ZXIsGarbageString(pMsg)) {
                     entry[@"lastMessage"] = pMsg;
                 }
+            }
+            if ([entry[@"rawName"] length] == 0) {
+                [unresolvedUIDs addObject:uid];
+            }
+        }
+
+        // 2. If exactly 1 hidden ID in HiddenChatEntity is still unresolved AND user captured 1 unassigned result via PIN search (or tapped 1 result), auto-link it!
+        if (unresolvedUIDs.count == 1) {
+            NSString *loneUID = unresolvedUIDs.firstObject;
+            NSDictionary *matchedPinItem = nil;
+
+            NSDictionary *lastSelected = [ramProfiles[@"_last_pin_selected"] isKindOfClass:[NSDictionary class]] ? ramProfiles[@"_last_pin_selected"] : nil;
+            if (lastSelected) {
+                NSString *sName = [lastSelected[@"name"] description] ?: @"";
+                if (ZXIsValidHumanDisplayName(sName, loneUID) && ![assignedNames containsObject:sName]) {
+                    matchedPinItem = lastSelected;
+                }
+            }
+            if (!matchedPinItem && [ramProfiles[@"_pin_captured_items"] isKindOfClass:[NSDictionary class]]) {
+                NSDictionary *pinItems = ramProfiles[@"_pin_captured_items"];
+                NSMutableArray<NSDictionary *> *unassigned = [NSMutableArray new];
+                for (NSString *k in pinItems) {
+                    NSDictionary *it = pinItems[k];
+                    if (![it isKindOfClass:[NSDictionary class]]) continue;
+                    NSString *cName = [it[@"name"] description] ?: @"";
+                    if (ZXIsValidHumanDisplayName(cName, loneUID) && ![assignedNames containsObject:cName]) {
+                        [unassigned addObject:it];
+                    }
+                }
+                if (unassigned.count == 1) {
+                    matchedPinItem = unassigned.firstObject;
+                }
+            }
+
+            if (matchedPinItem) {
+                NSString *linkedName = [matchedPinItem[@"name"] description] ?: @"";
+                NSString *linkedMsg = [matchedPinItem[@"lastMessage"] description] ?: @"";
+                NSMutableDictionary *entry = found[loneUID];
+                entry[@"rawName"] = linkedName;
+                if (linkedMsg.length > 0 && !ZXIsGarbageString(linkedMsg)) {
+                    entry[@"lastMessage"] = linkedMsg;
+                }
+                // Persist this permanent ID -> Name link back into Documents/zx_resolved_profiles.json
+                ramProfiles[loneUID] = @{
+                    @"uid": loneUID,
+                    @"name": linkedName,
+                    @"lastMessage": linkedMsg,
+                    @"isHidden": @YES,
+                    @"timestamp": @((long long)[[NSDate date] timeIntervalSince1970])
+                };
+                [ramProfiles removeObjectForKey:@"_last_pin_selected"];
+                NSData *outData = [NSJSONSerialization dataWithJSONObject:ramProfiles options:0 error:nil];
+                if (outData && primaryPath.length > 0) {
+                    [outData writeToFile:primaryPath atomically:YES];
+                }
+                ZXLog(@"Auto-linked lone HiddenChatEntity ID %@ -> '%@'", loneUID, linkedName);
             }
         }
 
@@ -388,8 +460,8 @@ static void ZXScanDatabaseForHiddenIDs(NSString *dbPath, NSMutableDictionary<NSS
             if (lastMsg.length == 0) {
                 NSString *src = entry[@"sourceTable"] ?: @"HiddenChatEntity";
                 lastMsg = rawName.length > 0
-                    ? [NSString stringWithFormat:@"Đã giải mã từ RAM • %@", src]
-                    : [NSString stringWithFormat:@"%@ • Nhập PIN ẩn ở Tìm kiếm Zalo để giải mã tên thật", src];
+                    ? [NSString stringWithFormat:@"Đã giải mã tên thật • %@", src]
+                    : [NSString stringWithFormat:@"%@ • Bấm Mở thẳng khung chat để nhập PIN & tự lưu tên", src];
             }
             [finalList addObject:@{
                 @"uid": uid,
@@ -400,7 +472,7 @@ static void ZXScanDatabaseForHiddenIDs(NSString *dbPath, NSMutableDictionary<NSS
             }];
         }
 
-        ZXLog(@"HiddenChatEntity + RAM profile lookup inspected %lu DBs (%lu RAM profiles), resolved %lu hidden chats",
+        ZXLog(@"HiddenChatEntity + RAM profile lookup inspected %lu DBs (%lu RAM entries), resolved %lu hidden chats",
               (unsigned long)dbPaths.count, (unsigned long)ramProfiles.count, (unsigned long)finalList.count);
         return finalList;
     } @catch (NSException *e) {

@@ -505,13 +505,12 @@ static void ZXHookBubbleShow(void)
         return cell;
     }
     NSDictionary *c = self.chats[indexPath.row];
-    NSString *titleText = [c[@"name"] description] ?: @"";
     NSString *uid = [c[@"uid"] description] ?: @"?";
-    if (titleText.length == 0) {
-        titleText = [NSString stringWithFormat:@"Chưa giải mã tên • ID: %@", uid];
-    } else if ([titleText rangeOfString:uid].location == NSNotFound) {
-        titleText = [NSString stringWithFormat:@"%@ (ID: %@)", titleText, uid];
-    }
+    NSString *rawName = [c[@"rawName"] description] ?: @"";
+    BOOL hasRealName = [ZXScanner isValidHumanDisplayName:rawName excludeUID:uid];
+    NSString *titleText = hasRealName
+        ? [NSString stringWithFormat:@"%@ (ID: %@)", rawName, uid]
+        : [NSString stringWithFormat:@"Hội thoại ẩn cũ (ID: %@)", uid];
     cell.textLabel.text = titleText;
     cell.detailTextLabel.text = [NSString stringWithFormat:@"Tin cuối: %@", c[@"lastMessage"] ?: @"(Trống)"];
     cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
@@ -524,35 +523,63 @@ static void ZXHookBubbleShow(void)
     NSDictionary *c = self.chats[indexPath.row];
     NSString *uid = [c[@"uid"] description] ?: @"";
     NSString *rawName = [c[@"rawName"] description] ?: @"";
-    NSString *name = rawName.length > 0 ? rawName : ([c[@"name"] description] ?: uid);
+    BOOL hasRealName = [ZXScanner isValidHumanDisplayName:rawName excludeUID:uid];
+    // STRICT RULE: NEVER pass numeric uid or "Hội thoại ẩn cũ..." placeholder as a search name!
+    NSString *verifiedRealName = hasRealName ? rawName : @"";
+    NSString *sheetTitle = hasRealName
+        ? [NSString stringWithFormat:@"%@ (ID: %@)", rawName, uid]
+        : [NSString stringWithFormat:@"Hội thoại ẩn cũ (ID: %@)", uid];
 
-    UIAlertController *sheet = [UIAlertController alertControllerWithTitle:([c[@"name"] description] ?: name)
-                                                                   message:[NSString stringWithFormat:@"ID gốc: %@\n%@", uid, c[@"lastMessage"] ?: @""]
+    UIAlertController *sheet = [UIAlertController alertControllerWithTitle:sheetTitle
+                                                                   message:[NSString stringWithFormat:@"%@", c[@"lastMessage"] ?: @""]
                                                             preferredStyle:UIAlertControllerStyleActionSheet];
     if (@available(iOS 13.0, *)) sheet.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
     [sheet addAction:[UIAlertAction actionWithTitle:@"💬 Mở thẳng khung chat" style:UIAlertActionStyleDefault handler:^(UIAlertAction *act) {
         (void)act;
-        // Step A: Dismiss all presented UIViewControllers from the rootViewController of the keyWindow
-        UIWindow *keyWin = ZXKeyWindow();
-        UIViewController *rootVC = keyWin.rootViewController ?: self;
-        [rootVC dismissViewControllerAnimated:YES completion:^{
-            [ZXBubble show];
-            ZXRefreshFloatingBubbleNow();
-            [ZXHookEngine openChatWithID:uid displayName:name];
-        }];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            @try {
+                // Walk presentingViewController chain to the root-most host so ALL thanhthe popups close cleanly
+                UIViewController *rootPresenter = self;
+                while (rootPresenter.presentingViewController) {
+                    rootPresenter = rootPresenter.presentingViewController;
+                }
+                UIWindow *keyWin = ZXKeyWindow();
+                if (!rootPresenter && keyWin.rootViewController) {
+                    rootPresenter = keyWin.rootViewController;
+                }
+                void (^afterDismiss)(void) = ^{
+                    @try {
+                        [ZXBubble show];
+                        ZXRefreshFloatingBubbleNow();
+                        [ZXHookEngine openChatWithID:uid displayName:verifiedRealName];
+                    } @catch (NSException *ex) {
+                        ZXLog(@"openChatWithID afterDismiss exception: %@", ex.reason);
+                    }
+                };
+                if (rootPresenter.presentedViewController) {
+                    [rootPresenter dismissViewControllerAnimated:YES completion:afterDismiss];
+                } else {
+                    [self dismissViewControllerAnimated:YES completion:afterDismiss];
+                }
+            } @catch (NSException *ex) {
+                ZXLog(@"HiddenChat open action exception: %@", ex.reason);
+            }
+        });
     }]];
     [sheet addAction:[UIAlertAction actionWithTitle:@"👁️ Bỏ ẩn nhanh hội thoại này" style:UIAlertActionStyleDefault handler:^(UIAlertAction *act) {
         (void)act;
         [ZXHookEngine unhideChatWithID:uid];
         [self reloadChats];
         ZXShowToast(self.navigationController.view ?: self.view,
-                    [NSString stringWithFormat:@"Đã bỏ ẩn %@ & cập nhật danh sách Tin nhắn", name]);
+                    [NSString stringWithFormat:@"Đã bỏ ẩn %@ & cập nhật danh sách Tin nhắn", (hasRealName ? rawName : sheetTitle)]);
     }]];
-    [sheet addAction:[UIAlertAction actionWithTitle:@"📋 Sao chép Tên & UID" style:UIAlertActionStyleDefault handler:^(UIAlertAction *act) {
-        (void)act;
-        [UIPasteboard generalPasteboard].string = ([name hasPrefix:@"UID:"] ? uid : name);
-        ZXShowToast(self.navigationController.view ?: self.view, @"Đã sao chép vào bộ nhớ tạm");
-    }]];
+    if (hasRealName) {
+        [sheet addAction:[UIAlertAction actionWithTitle:@"📋 Sao chép Tên thật" style:UIAlertActionStyleDefault handler:^(UIAlertAction *act) {
+            (void)act;
+            [UIPasteboard generalPasteboard].string = verifiedRealName;
+            ZXShowToast(self.navigationController.view ?: self.view, @"Đã sao chép tên thật vào bộ nhớ tạm");
+        }]];
+    }
     [sheet addAction:[UIAlertAction actionWithTitle:@"Đóng" style:UIAlertActionStyleCancel handler:nil]];
     sheet.popoverPresentationController.sourceView = [tableView cellForRowAtIndexPath:indexPath];
     [self presentViewController:sheet animated:YES completion:nil];

@@ -29,7 +29,7 @@ static UIButton *gKeyboardSpamButton;
 static CGFloat gLastKeyboardTopY;
 static BOOL gSQLiteScanInProgress;
 
-// Hide-chat real name capture state (Cách 1: Swipe/LongPress, Cách 2: Chat Options Switch)
+// Hide-chat real name capture state (Cách 1: Swipe/LongPress, Cách 2: Chat Options Switch, Cách 3: PIN Search Capture)
 static NSString *sCandidateChatName;
 static NSString *sCandidateLastMsg;
 static NSString *sCandidateChatUID;
@@ -37,6 +37,15 @@ static NSString *sCurrentOpenChatName;
 static NSString *sCurrentOpenChatUID;
 static NSSet<NSString *> *sHiddenIDsBeforeAction;
 static NSMutableSet<NSString *> *sSwizzledTableDelegates;
+static NSMutableSet<NSString *> *sSwizzledTableDataSources;
+static NSMutableSet<NSString *> *sSwizzledCollectionDelegates;
+static NSMutableSet<NSString *> *sSwizzledCollectionDataSources;
+static NSMutableSet<NSString *> *sSwizzledSearchDelegates;
+static NSString *sCandidateTypedPIN;
+static double sCandidatePinTypedTime = 0.0;
+static NSString *sPendingResolveTargetUID;
+static BOOL sAwaitingPinSearchResult = NO;
+static NSMutableArray<NSString *> *sCurrentPinResultNames;
 
 // Spam state
 static BOOL gSpamRunning;
@@ -133,14 +142,20 @@ static void ZXInitHiddenChatsStore(void)
         gHiddenChatsMap = [NSMutableDictionary new];
         gResolvedProfilesMap = [NSMutableDictionary new];
         gUnlockedSessionChats = [NSMutableSet new];
+        sCurrentPinResultNames = [NSMutableArray new];
         NSArray *savedUnhidden = [[NSUserDefaults standardUserDefaults] arrayForKey:@"nthe_unhidden_thread_ids"];
         sUnhiddenThreadIDs = [NSMutableSet setWithArray:(savedUnhidden ?: @[])];
         @try {
-            NSData *pData = [NSData dataWithContentsOfFile:[ZXScanner resolvedProfilesPath]];
-            if (pData) {
-                id pDict = [NSJSONSerialization JSONObjectWithData:pData options:0 error:nil];
-                if ([pDict isKindOfClass:[NSDictionary class]]) {
-                    [gResolvedProfilesMap addEntriesFromDictionary:(NSDictionary *)pDict];
+            NSString *legacyProfPath = [[ZXConfig dataDir] stringByAppendingPathComponent:@"zx_resolved_profiles.json"];
+            NSString *primaryProfPath = [ZXScanner resolvedProfilesPath];
+            for (NSString *pp in @[legacyProfPath, primaryProfPath]) {
+                if (pp.length == 0) continue;
+                NSData *pData = [NSData dataWithContentsOfFile:pp];
+                if (pData) {
+                    id pDict = [NSJSONSerialization JSONObjectWithData:pData options:0 error:nil];
+                    if ([pDict isKindOfClass:[NSDictionary class]]) {
+                        [gResolvedProfilesMap addEntriesFromDictionary:(NSDictionary *)pDict];
+                    }
                 }
             }
         } @catch (__unused NSException *e) {}
@@ -164,24 +179,30 @@ static void ZXInitHiddenChatsStore(void)
     });
 }
 
+static void ZXSaveResolvedProfilesNow(void)
+{
+    @try {
+        ZXInitHiddenChatsStore();
+        NSDictionary *snap = nil;
+        @synchronized (gResolvedProfilesMap) {
+            snap = [gResolvedProfilesMap copy];
+        }
+        if (snap.count > 0) {
+            NSData *d = [NSJSONSerialization dataWithJSONObject:snap options:0 error:nil];
+            if (d) [d writeToFile:[ZXScanner resolvedProfilesPath] atomically:YES];
+        }
+    } @catch (__unused NSException *e) {}
+}
+
 static void ZXScheduleSaveResolvedProfiles(void)
 {
     if (gProfilesSaveScheduled) return;
     gProfilesSaveScheduled = YES;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-        @try {
-            NSDictionary *snap = nil;
-            @synchronized (gResolvedProfilesMap) {
-                gProfilesSaveScheduled = NO;
-                snap = [gResolvedProfilesMap copy];
-            }
-            if (snap.count > 0) {
-                NSData *d = [NSJSONSerialization dataWithJSONObject:snap options:0 error:nil];
-                if (d) [d writeToFile:[ZXScanner resolvedProfilesPath] atomically:YES];
-            }
-        } @catch (__unused NSException *e) {
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.2 * NSEC_PER_SEC)), dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        @synchronized (gResolvedProfilesMap) {
             gProfilesSaveScheduled = NO;
         }
+        ZXSaveResolvedProfilesNow();
     });
 }
 
@@ -431,25 +452,74 @@ static void ZXIndexDataSourceModels(id dataSource)
     } @catch (__unused NSException *e) {}
 }
 
-// ---- Hide-Chat Real Name Capture (Cách 1: Swipe/LongPress & Cách 2: Chat Options Switch) ----
+// ---- Hide-Chat Real Name Capture (Cách 1: Swipe/LongPress, Cách 2: Chat Options Switch, Cách 3: PIN Search Capture) ----
+
+static UIViewController *ZXNearestViewControllerForView(UIView *view);
+static UISearchBar *ZXFindSearchBarInView(UIView *v);
+static UITextField *ZXFindSearchTextFieldInView(UIView *v);
+
+static BOOL ZXIsPinCodeString(NSString *raw)
+{
+    if (!raw) return NO;
+    NSString *trim = [raw stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    if (trim.length < 4 || trim.length > 6) return NO;
+    for (NSUInteger i = 0; i < trim.length; i++) {
+        unichar c = [trim characterAtIndex:i];
+        if (c < '0' || c > '9') return NO;
+    }
+    return YES;
+}
+
+static BOOL ZXIsPureDigitsString(NSString *raw)
+{
+    if (!raw) return NO;
+    NSString *trim = [raw stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    if (trim.length == 0) return NO;
+    NSString *rem = [trim stringByTrimmingCharactersInSet:NSCharacterSet.decimalDigitCharacterSet];
+    return (rem.length == 0);
+}
 
 static BOOL ZXIsLikelyTimestampOrBadge(NSString *text)
 {
     if (text.length == 0) return YES;
-    NSString *lc = text.lowercaseString;
-    if (text.length <= 5 && ([lc containsString:@":"] || [lc hasSuffix:@"p"] || [lc hasSuffix:@"g"] || [lc hasSuffix:@"+"])) {
+    NSString *trim = [text stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    if (trim.length == 0) return YES;
+    if (ZXIsPureDigitsString(trim)) return YES;
+    NSString *lc = trim.lowercaseString;
+    if (trim.length <= 6 && ([lc containsString:@":"] || [lc hasSuffix:@"p"] || [lc hasSuffix:@"g"] || [lc hasSuffix:@"+"])) {
         return YES;
     }
-    if ([lc hasSuffix:@" phút"] || [lc hasSuffix:@" giờ"] || [lc hasSuffix:@" ngày"] ||
-        [lc isEqualToString:@"vừa xong"] || [lc isEqualToString:@"hôm qua"] || [lc isEqualToString:@"yesterday"]) {
+    // Date formats like 12/11, 12/11/2026, 12-11
+    if (trim.length <= 10 && ([trim containsString:@"/"] || [trim containsString:@"-"])) {
+        NSCharacterSet *dateChars = [NSCharacterSet characterSetWithCharactersInString:@"0123456789/- "];
+        if ([[trim stringByTrimmingCharactersInSet:dateChars] length] == 0) return YES;
+    }
+    if ([lc hasSuffix:@" phút"] || [lc hasSuffix:@" giờ"] || [lc hasSuffix:@" ngày"] || [lc hasSuffix:@" tuần"] ||
+        [lc isEqualToString:@"vừa xong"] || [lc isEqualToString:@"hôm qua"] || [lc isEqualToString:@"hôm nay"] ||
+        [lc isEqualToString:@"yesterday"] || [lc isEqualToString:@"today"]) {
         return YES;
     }
     return NO;
 }
 
+static CGFloat ZXLabelProminenceScore(UILabel *lbl)
+{
+    if (!lbl || !lbl.font) return 14.0;
+    CGFloat score = lbl.font.pointSize;
+    UIFontDescriptorSymbolicTraits traits = lbl.font.fontDescriptor.symbolicTraits;
+    if ((traits & UIFontDescriptorTraitBold) != 0) {
+        score += 2.5;
+    } else {
+        NSString *fn = (lbl.font.fontName ?: @"").lowercaseString;
+        if ([fn containsString:@"bold"] || [fn containsString:@"heavy"] || [fn containsString:@"black"]) score += 2.5;
+        else if ([fn containsString:@"semibold"] || [fn containsString:@"demi"] || [fn containsString:@"medium"]) score += 1.2;
+    }
+    return score;
+}
+
 static void ZXCollectRankedLabels(UIView *v, NSMutableArray<UILabel *> *outLabels, int depth)
 {
-    if (!v || v.hidden || v.alpha < 0.05 || depth > 5 || outLabels.count >= 16) return;
+    if (!v || v.hidden || v.alpha < 0.05 || depth > 6 || outLabels.count >= 20) return;
     if ([v isKindOfClass:[UILabel class]]) {
         UILabel *lbl = (UILabel *)v;
         NSString *t = [lbl.text ?: @"" stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
@@ -462,46 +532,84 @@ static void ZXCollectRankedLabels(UIView *v, NSMutableArray<UILabel *> *outLabel
     }
 }
 
-static void ZXCaptureCandidateFromCell(UIView *cell)
+static void ZXExtractBestNameAndMsgFromCell(UIView *cell, NSString **outName, NSString **outMsg, NSString **outUID)
 {
     if (!cell) return;
+    NSString *foundUID = @"";
     @try {
-        NSString *foundUID = @"";
-        for (NSString *prop in @[@"chatEntity", @"item", @"chatItem", @"entity", @"model", @"contact", @"user", @"thread", @"conversation", @"viewModel", @"data", @"chatObject"]) {
+        for (NSString *prop in @[@"chatEntity", @"item", @"chatItem", @"entity", @"model", @"contact", @"user", @"thread", @"conversation", @"viewModel", @"data", @"chatObject", @"searchResult", @"result", @"profile"]) {
             if ([cell respondsToSelector:NSSelectorFromString(prop)]) {
                 id m = [cell valueForKey:prop];
                 if (!m) continue;
-                NSString *u = ZXReadStringKVC(m, @[@"userId", @"uid", @"threadId", @"conversationId", @"contactId", @"friendId", @"groupId", @"chatId", @"targetId", @"zaloId"]);
+                NSString *u = ZXReadStringKVC(m, @[@"userId", @"uid", @"threadId", @"conversationId", @"contactId", @"friendId", @"groupId", @"chatId", @"targetId", @"zaloId", @"entityId"]);
                 if (u.length >= 4 && ![ZXScanner isGarbageChatIdentifier:u]) {
                     foundUID = u;
                     break;
                 }
+                for (NSString *subProp in @[@"contact", @"user", @"thread", @"chatEntity", @"conversation", @"entity", @"item", @"model"]) {
+                    if ([m respondsToSelector:NSSelectorFromString(subProp)]) {
+                        id sm = [m valueForKey:subProp];
+                        if (sm) {
+                            NSString *u2 = ZXReadStringKVC(sm, @[@"userId", @"uid", @"threadId", @"conversationId", @"contactId", @"friendId", @"groupId", @"chatId"]);
+                            if (u2.length >= 4 && ![ZXScanner isGarbageChatIdentifier:u2]) {
+                                foundUID = u2;
+                                break;
+                            }
+                        }
+                    }
+                }
+                if (foundUID.length >= 4) break;
             }
         }
 
+        UIView *scanRoot = cell;
+        if ([cell isKindOfClass:[UITableViewCell class]] && ((UITableViewCell *)cell).contentView.subviews.count > 0) {
+            scanRoot = ((UITableViewCell *)cell).contentView;
+        } else if ([cell isKindOfClass:[UICollectionViewCell class]] && ((UICollectionViewCell *)cell).contentView.subviews.count > 0) {
+            scanRoot = ((UICollectionViewCell *)cell).contentView;
+        }
+
         NSMutableArray<UILabel *> *labels = [NSMutableArray new];
-        ZXCollectRankedLabels(cell, labels, 0);
-        // Sort prominent title label first: larger font size, then higher vertical position
+        ZXCollectRankedLabels(scanRoot, labels, 0);
+        if (labels.count == 0 && scanRoot != cell) {
+            ZXCollectRankedLabels(cell, labels, 0);
+        }
+
         [labels sortUsingComparator:^NSComparisonResult(UILabel *a, UILabel *b) {
-            CGFloat fa = a.font ? a.font.pointSize : 14.0;
-            CGFloat fb = b.font ? b.font.pointSize : 14.0;
-            if (fabs(fa - fb) >= 0.8) return (fa > fb) ? NSOrderedAscending : NSOrderedDescending;
+            CGFloat sa = ZXLabelProminenceScore(a);
+            CGFloat sb = ZXLabelProminenceScore(b);
+            if (fabs(sa - sb) >= 0.7) return (sa > sb) ? NSOrderedAscending : NSOrderedDescending;
             CGFloat ya = [a convertPoint:CGPointZero toView:cell].y;
             CGFloat yb = [b convertPoint:CGPointZero toView:cell].y;
             return (ya < yb) ? NSOrderedAscending : NSOrderedDescending;
         }];
 
-        NSString *candName = @"";
-        NSString *candMsg = @"";
+        NSString *bestName = @"";
+        NSString *bestMsg = @"";
         for (UILabel *lbl in labels) {
             NSString *t = [lbl.text ?: @"" stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
-            if (candName.length == 0 && [ZXScanner isValidHumanDisplayName:t excludeUID:foundUID]) {
-                candName = t;
-            } else if (candName.length > 0 && candMsg.length == 0 && ![t isEqualToString:candName]) {
-                candMsg = t;
+            if (bestName.length == 0 && [ZXScanner isValidHumanDisplayName:t excludeUID:foundUID]) {
+                bestName = t;
+            } else if (bestName.length > 0 && bestMsg.length == 0 && ![t isEqualToString:bestName] && !ZXIsLikelyTimestampOrBadge(t)) {
+                bestMsg = t;
                 break;
             }
         }
+
+        if (outName) *outName = bestName;
+        if (outMsg) *outMsg = bestMsg;
+        if (outUID) *outUID = foundUID;
+    } @catch (__unused NSException *e) {}
+}
+
+static void ZXCaptureCandidateFromCell(UIView *cell)
+{
+    if (!cell) return;
+    @try {
+        NSString *candName = @"";
+        NSString *candMsg = @"";
+        NSString *foundUID = @"";
+        ZXExtractBestNameAndMsgFromCell(cell, &candName, &candMsg, &foundUID);
 
         if (candName.length > 0) {
             sCandidateChatName = candName;
@@ -509,10 +617,144 @@ static void ZXCaptureCandidateFromCell(UIView *cell)
             sCandidateChatUID = foundUID;
             ZXLog(@"Captured swipe/longpress candidate: '%@' (uid=%@)", candName, foundUID);
 
-            // Take a fast snapshot of existing HiddenChatEntity IDs before the user taps Hide
             dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
                 NSArray<NSString *> *ids = [ZXScanner currentHiddenChatEntityIDs];
                 sHiddenIDsBeforeAction = [NSSet setWithArray:ids ?: @[]];
+            });
+        }
+    } @catch (__unused NSException *e) {}
+}
+
+static void ZXNotePotentialSearchText(NSString *text, UIView *sourceView)
+{
+    @try {
+        if (sourceView) {
+            UIViewController *vc = ZXNearestViewControllerForView(sourceView);
+            if (vc && [NSStringFromClass([vc class]) hasPrefix:@"ZX"]) return;
+        }
+        NSString *trim = [text ?: @"" stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+        if (ZXIsPinCodeString(trim)) {
+            ZXInitHiddenChatsStore();
+            if (![sCandidateTypedPIN isEqualToString:trim]) {
+                @synchronized (gResolvedProfilesMap) {
+                    [sCurrentPinResultNames removeAllObjects];
+                }
+            }
+            sCandidateTypedPIN = trim;
+            sCandidatePinTypedTime = CFAbsoluteTimeGetCurrent();
+        }
+    } @catch (__unused NSException *e) {}
+}
+
+static NSString *ZXCurrentPinInWindow(UIWindow *win)
+{
+    if (!win) return @"";
+    @try {
+        UISearchBar *sb = ZXFindSearchBarInView(win);
+        if (sb && ZXIsPinCodeString(sb.text)) {
+            return [sb.text stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+        }
+        UITextField *tf = ZXFindSearchTextFieldInView(win);
+        if (tf && ZXIsPinCodeString(tf.text)) {
+            return [tf.text stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+        }
+    } @catch (__unused NSException *e) {}
+    return @"";
+}
+
+static void ZXHandleSearchOrPinResultCell(UIView *cell, UIView *listView, BOOL wasSelected)
+{
+    if (!cell || !listView) return;
+    @try {
+        UIViewController *ownerVC = ZXNearestViewControllerForView(listView);
+        NSString *vcCls = ownerVC ? NSStringFromClass([ownerVC class]) : @"";
+        if ([vcCls hasPrefix:@"ZX"]) return;
+
+        NSString *activeWindowPin = ZXCurrentPinInWindow(listView.window);
+        double elapsedSincePin = CFAbsoluteTimeGetCurrent() - sCandidatePinTypedTime;
+        BOOL recentPinTyped = (sCandidateTypedPIN.length >= 4 && elapsedSincePin >= 0.0 && elapsedSincePin <= 25.0) || (activeWindowPin.length >= 4);
+        BOOL isSearchVC = ([vcCls rangeOfString:@"Search" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+                           [vcCls rangeOfString:@"Pin" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+                           [vcCls rangeOfString:@"Hidden" options:NSCaseInsensitiveSearch].location != NSNotFound);
+
+        if (!recentPinTyped && !sAwaitingPinSearchResult && !isSearchVC) return;
+
+        NSString *displayName = @"";
+        NSString *lastMsg = @"";
+        NSString *cellUID = @"";
+        ZXExtractBestNameAndMsgFromCell(cell, &displayName, &lastMsg, &cellUID);
+        if (![ZXScanner isValidHumanDisplayName:displayName excludeUID:cellUID]) return;
+
+        ZXInitHiddenChatsStore();
+        long long nowTs = (long long)[[NSDate date] timeIntervalSince1970];
+
+        // 1. If a 4-6 digit PIN was just entered and Zalo displayed a valid chat result cell, save PIN to NSUserDefaults!
+        NSString *confirmedPin = activeWindowPin.length >= 4 ? activeWindowPin : (recentPinTyped ? sCandidateTypedPIN : @"");
+        if (ZXIsPinCodeString(confirmedPin)) {
+            [[NSUserDefaults standardUserDefaults] setObject:confirmedPin forKey:@"zx_saved_hidden_pin"];
+            @synchronized (gResolvedProfilesMap) {
+                if (![sCurrentPinResultNames containsObject:displayName]) {
+                    [sCurrentPinResultNames addObject:displayName];
+                }
+                NSMutableDictionary *pinItems = [gResolvedProfilesMap[@"_pin_captured_items"] isKindOfClass:[NSDictionary class]]
+                    ? [gResolvedProfilesMap[@"_pin_captured_items"] mutableCopy]
+                    : [NSMutableDictionary new];
+                pinItems[displayName] = @{
+                    @"name": displayName,
+                    @"lastMessage": lastMsg ?: @"",
+                    @"timestamp": @(nowTs)
+                };
+                gResolvedProfilesMap[@"_pin_captured_items"] = pinItems;
+                if (wasSelected) {
+                    gResolvedProfilesMap[@"_last_pin_selected"] = @{
+                        @"name": displayName,
+                        @"lastMessage": lastMsg ?: @"",
+                        @"timestamp": @(nowTs)
+                    };
+                }
+            }
+        }
+
+        // 2. If cell model directly exposed a valid threadId/uid, record immediately
+        if (cellUID.length >= 4 && ![ZXScanner isGarbageChatIdentifier:cellUID]) {
+            ZXRecordResolvedProfile(cellUID, displayName, lastMsg, recentPinTyped);
+        }
+
+        // 3. Auto-link displayName to HiddenChatEntity ID when user tapped result or when there is 1 unresolved hidden ID & 1 PIN result
+        if (recentPinTyped || sAwaitingPinSearchResult) {
+            NSString *pendingUID = sPendingResolveTargetUID;
+            if (wasSelected && pendingUID.length >= 4 && ![ZXScanner isGarbageChatIdentifier:pendingUID]) {
+                ZXRecordResolvedProfile(pendingUID, displayName, lastMsg, YES);
+                sPendingResolveTargetUID = nil;
+                sAwaitingPinSearchResult = NO;
+                ZXSaveResolvedProfilesNow();
+                return;
+            }
+
+            dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+                @try {
+                    NSArray<NSString *> *hiddenIDs = [ZXScanner currentHiddenChatEntityIDs];
+                    NSMutableArray<NSString *> *unresolved = [NSMutableArray new];
+                    NSUInteger pinCount = 0;
+                    @synchronized (gResolvedProfilesMap) {
+                        pinCount = sCurrentPinResultNames.count;
+                        for (NSString *hid in hiddenIDs) {
+                            NSDictionary *prof = [gResolvedProfilesMap[hid] isKindOfClass:[NSDictionary class]] ? gResolvedProfilesMap[hid] : nil;
+                            NSString *existingName = [prof[@"name"] description] ?: @"";
+                            if (![ZXScanner isValidHumanDisplayName:existingName excludeUID:hid]) {
+                                [unresolved addObject:hid];
+                            }
+                        }
+                    }
+                    if (unresolved.count == 1 && (wasSelected || pinCount == 1)) {
+                        NSString *loneID = unresolved.firstObject;
+                        ZXRecordResolvedProfile(loneID, displayName, lastMsg, YES);
+                        sPendingResolveTargetUID = nil;
+                        sAwaitingPinSearchResult = NO;
+                        ZXLog(@"Linked PIN search result '%@' -> HiddenChatEntity ID %@", displayName, loneID);
+                    }
+                    ZXSaveResolvedProfilesNow();
+                } @catch (__unused NSException *e) {}
             });
         }
     } @catch (__unused NSException *e) {}
@@ -703,6 +945,155 @@ static void ZXSwizzleTableViewDelegateClassIfNeeded(id delegate)
                     if (cell) ZXCaptureCandidateFromCell(cell);
                 } @catch (__unused NSException *e) {}
                 return ((id (*)(id, SEL, UITableView *, NSIndexPath *))origEdit)(self_, selEdit, tv, ip);
+            }));
+        }
+
+        // Hook tableView:didSelectRowAtIndexPath: (capture tapped hidden result after PIN entry)
+        SEL selSelect = @selector(tableView:didSelectRowAtIndexPath:);
+        Method mSelect = class_getInstanceMethod(cls, selSelect);
+        if (mSelect) {
+            IMP origSelect = method_getImplementation(mSelect);
+            method_setImplementation(mSelect, imp_implementationWithBlock(^(id self_, UITableView *tv, NSIndexPath *ip) {
+                @try {
+                    UITableViewCell *cell = [tv cellForRowAtIndexPath:ip];
+                    if (cell) ZXHandleSearchOrPinResultCell(cell, tv, YES);
+                } @catch (__unused NSException *e) {}
+                ((void (*)(id, SEL, UITableView *, NSIndexPath *))origSelect)(self_, selSelect, tv, ip);
+            }));
+        }
+    } @catch (__unused NSException *e) {}
+}
+
+static void ZXSwizzleTableViewDataSourceClassIfNeeded(id dataSource)
+{
+    if (!dataSource) return;
+    @try {
+        Class cls = [dataSource class];
+        NSString *clsName = NSStringFromClass(cls);
+        if (!clsName || [clsName hasPrefix:@"ZX"] || [clsName hasPrefix:@"UI"] || [clsName hasPrefix:@"_"]) return;
+        if (!sSwizzledTableDataSources) sSwizzledTableDataSources = [NSMutableSet new];
+        @synchronized (sSwizzledTableDataSources) {
+            if ([sSwizzledTableDataSources containsObject:clsName]) return;
+            [sSwizzledTableDataSources addObject:clsName];
+        }
+
+        SEL selCell = @selector(tableView:cellForRowAtIndexPath:);
+        Method mCell = class_getInstanceMethod(cls, selCell);
+        if (mCell) {
+            IMP origCell = method_getImplementation(mCell);
+            method_setImplementation(mCell, imp_implementationWithBlock(^UITableViewCell *(id self_, UITableView *tv, NSIndexPath *ip) {
+                UITableViewCell *cell = ((UITableViewCell *(*)(id, SEL, UITableView *, NSIndexPath *))origCell)(self_, selCell, tv, ip);
+                @try {
+                    if (cell) ZXHandleSearchOrPinResultCell(cell, tv, NO);
+                } @catch (__unused NSException *e) {}
+                return cell;
+            }));
+        }
+    } @catch (__unused NSException *e) {}
+}
+
+static void ZXSwizzleCollectionViewDelegateClassIfNeeded(id delegate)
+{
+    if (!delegate) return;
+    @try {
+        Class cls = [delegate class];
+        NSString *clsName = NSStringFromClass(cls);
+        if (!clsName || [clsName hasPrefix:@"ZX"] || [clsName hasPrefix:@"UI"] || [clsName hasPrefix:@"_"]) return;
+        if (!sSwizzledCollectionDelegates) sSwizzledCollectionDelegates = [NSMutableSet new];
+        @synchronized (sSwizzledCollectionDelegates) {
+            if ([sSwizzledCollectionDelegates containsObject:clsName]) return;
+            [sSwizzledCollectionDelegates addObject:clsName];
+        }
+
+        SEL selSelect = @selector(collectionView:didSelectItemAtIndexPath:);
+        Method mSelect = class_getInstanceMethod(cls, selSelect);
+        if (mSelect) {
+            IMP origSelect = method_getImplementation(mSelect);
+            method_setImplementation(mSelect, imp_implementationWithBlock(^(id self_, UICollectionView *cv, NSIndexPath *ip) {
+                @try {
+                    UICollectionViewCell *cell = [cv cellForItemAtIndexPath:ip];
+                    if (cell) ZXHandleSearchOrPinResultCell(cell, cv, YES);
+                } @catch (__unused NSException *e) {}
+                ((void (*)(id, SEL, UICollectionView *, NSIndexPath *))origSelect)(self_, selSelect, cv, ip);
+            }));
+        }
+    } @catch (__unused NSException *e) {}
+}
+
+static void ZXSwizzleCollectionViewDataSourceClassIfNeeded(id dataSource)
+{
+    if (!dataSource) return;
+    @try {
+        Class cls = [dataSource class];
+        NSString *clsName = NSStringFromClass(cls);
+        if (!clsName || [clsName hasPrefix:@"ZX"] || [clsName hasPrefix:@"UI"] || [clsName hasPrefix:@"_"]) return;
+        if (!sSwizzledCollectionDataSources) sSwizzledCollectionDataSources = [NSMutableSet new];
+        @synchronized (sSwizzledCollectionDataSources) {
+            if ([sSwizzledCollectionDataSources containsObject:clsName]) return;
+            [sSwizzledCollectionDataSources addObject:clsName];
+        }
+
+        SEL selCell = @selector(collectionView:cellForItemAtIndexPath:);
+        Method mCell = class_getInstanceMethod(cls, selCell);
+        if (mCell) {
+            IMP origCell = method_getImplementation(mCell);
+            method_setImplementation(mCell, imp_implementationWithBlock(^UICollectionViewCell *(id self_, UICollectionView *cv, NSIndexPath *ip) {
+                UICollectionViewCell *cell = ((UICollectionViewCell *(*)(id, SEL, UICollectionView *, NSIndexPath *))origCell)(self_, selCell, cv, ip);
+                @try {
+                    if (cell) ZXHandleSearchOrPinResultCell(cell, cv, NO);
+                } @catch (__unused NSException *e) {}
+                return cell;
+            }));
+        }
+    } @catch (__unused NSException *e) {}
+}
+
+static void ZXSwizzleSearchDelegateClassIfNeeded(id delegate)
+{
+    if (!delegate) return;
+    @try {
+        Class cls = [delegate class];
+        NSString *clsName = NSStringFromClass(cls);
+        if (!clsName || [clsName hasPrefix:@"ZX"] || [clsName hasPrefix:@"UI"] || [clsName hasPrefix:@"_"]) return;
+        if (!sSwizzledSearchDelegates) sSwizzledSearchDelegates = [NSMutableSet new];
+        @synchronized (sSwizzledSearchDelegates) {
+            if ([sSwizzledSearchDelegates containsObject:clsName]) return;
+            [sSwizzledSearchDelegates addObject:clsName];
+        }
+
+        SEL selSBChange = @selector(searchBar:textDidChange:);
+        Method mSBChange = class_getInstanceMethod(cls, selSBChange);
+        if (mSBChange) {
+            IMP origSBChange = method_getImplementation(mSBChange);
+            method_setImplementation(mSBChange, imp_implementationWithBlock(^(id self_, UISearchBar *sb, NSString *searchText) {
+                @try {
+                    ZXNotePotentialSearchText(searchText ?: sb.text, sb);
+                } @catch (__unused NSException *e) {}
+                ((void (*)(id, SEL, UISearchBar *, NSString *))origSBChange)(self_, selSBChange, sb, searchText);
+            }));
+        }
+
+        SEL selSBClick = @selector(searchBarSearchButtonClicked:);
+        Method mSBClick = class_getInstanceMethod(cls, selSBClick);
+        if (mSBClick) {
+            IMP origSBClick = method_getImplementation(mSBClick);
+            method_setImplementation(mSBClick, imp_implementationWithBlock(^(id self_, UISearchBar *sb) {
+                @try {
+                    ZXNotePotentialSearchText(sb.text, sb);
+                } @catch (__unused NSException *e) {}
+                ((void (*)(id, SEL, UISearchBar *))origSBClick)(self_, selSBClick, sb);
+            }));
+        }
+
+        SEL selTFReturn = @selector(textFieldShouldReturn:);
+        Method mTFReturn = class_getInstanceMethod(cls, selTFReturn);
+        if (mTFReturn) {
+            IMP origTFReturn = method_getImplementation(mTFReturn);
+            method_setImplementation(mTFReturn, imp_implementationWithBlock(^BOOL(id self_, UITextField *tf) {
+                @try {
+                    ZXNotePotentialSearchText(tf.text, tf);
+                } @catch (__unused NSException *e) {}
+                return ((BOOL (*)(id, SEL, UITextField *))origTFReturn)(self_, selTFReturn, tf);
             }));
         }
     } @catch (__unused NSException *e) {}
@@ -1437,6 +1828,7 @@ static void ZXSendSingleTextInChat(UIViewController *chatVC, NSString *text)
 + (void)onKeyboardWillShow:(NSNotification *)n;
 + (void)onKeyboardWillHide:(NSNotification *)n;
 + (void)onInputDidBeginEditing:(NSNotification *)n;
++ (void)onSearchInputChanged:(NSNotification *)n;
 + (void)onAppDidEnterBackground:(NSNotification *)n;
 + (void)onAppWillEnterForeground:(NSNotification *)n;
 @end
@@ -1543,6 +1935,19 @@ static void ZXShowOrUpdateSpamOverlayButton(CGFloat keyboardTopY)
         ZXShowOrUpdateSpamOverlayButton(gLastKeyboardTopY);
     } @catch (NSException *e) {
         ZXLog(@"onInputDidBeginEditing exception: %@", e.reason);
+    }
+}
+
++ (void)onSearchInputChanged:(NSNotification *)n
+{
+    @try {
+        id obj = n.object;
+        if ([obj isKindOfClass:[UITextField class]]) {
+            UITextField *tf = (UITextField *)obj;
+            ZXNotePotentialSearchText(tf.text, tf);
+        }
+    } @catch (NSException *e) {
+        ZXLog(@"onSearchInputChanged exception: %@", e.reason);
     }
 }
 
@@ -1783,6 +2188,7 @@ static void ZXInstallExtendedFeatureHooks(void)
             [nc addObserver:[ZXUIRuntimeHelper class] selector:@selector(onKeyboardWillHide:) name:UIKeyboardWillHideNotification object:nil];
             [nc addObserver:[ZXUIRuntimeHelper class] selector:@selector(onInputDidBeginEditing:) name:UITextViewTextDidBeginEditingNotification object:nil];
             [nc addObserver:[ZXUIRuntimeHelper class] selector:@selector(onInputDidBeginEditing:) name:UITextFieldTextDidBeginEditingNotification object:nil];
+            [nc addObserver:[ZXUIRuntimeHelper class] selector:@selector(onSearchInputChanged:) name:UITextFieldTextDidChangeNotification object:nil];
             [nc addObserver:[ZXUIRuntimeHelper class] selector:@selector(onAppDidEnterBackground:) name:UIApplicationDidEnterBackgroundNotification object:nil];
             [nc addObserver:[ZXUIRuntimeHelper class] selector:@selector(onAppWillEnterForeground:) name:UIApplicationWillEnterForegroundNotification object:nil];
 
@@ -1815,7 +2221,7 @@ static void ZXInstallExtendedFeatureHooks(void)
                 }));
             }
 
-            // 1b. Hook UITableView -setDelegate:, UIContextualAction, UIAlertAction, and UIControl -sendAction:to:forEvent: for Cách 1 & Cách 2 Hide Detection
+            // 1b. Hook UITableView / UICollectionView / UISearchBar / UITextField delegates & dataSources for Hide & PIN Search Detection
             Method tvSetDel = class_getInstanceMethod([UITableView class], @selector(setDelegate:));
             if (tvSetDel) {
                 IMP origTVSetDel = method_getImplementation(tvSetDel);
@@ -1823,6 +2229,76 @@ static void ZXInstallExtendedFeatureHooks(void)
                     ((void (*)(id, SEL, id))origTVSetDel)(self_, @selector(setDelegate:), delegate);
                     @try {
                         if (delegate) ZXSwizzleTableViewDelegateClassIfNeeded(delegate);
+                    } @catch (__unused NSException *e) {}
+                }));
+            }
+            Method tvSetDS = class_getInstanceMethod([UITableView class], @selector(setDataSource:));
+            if (tvSetDS) {
+                IMP origTVSetDS = method_getImplementation(tvSetDS);
+                method_setImplementation(tvSetDS, imp_implementationWithBlock(^(UITableView *self_, id dataSource) {
+                    ((void (*)(id, SEL, id))origTVSetDS)(self_, @selector(setDataSource:), dataSource);
+                    @try {
+                        if (dataSource) ZXSwizzleTableViewDataSourceClassIfNeeded(dataSource);
+                    } @catch (__unused NSException *e) {}
+                }));
+            }
+            Method cvSetDel = class_getInstanceMethod([UICollectionView class], @selector(setDelegate:));
+            if (cvSetDel) {
+                IMP origCVSetDel = method_getImplementation(cvSetDel);
+                method_setImplementation(cvSetDel, imp_implementationWithBlock(^(UICollectionView *self_, id delegate) {
+                    ((void (*)(id, SEL, id))origCVSetDel)(self_, @selector(setDelegate:), delegate);
+                    @try {
+                        if (delegate) ZXSwizzleCollectionViewDelegateClassIfNeeded(delegate);
+                    } @catch (__unused NSException *e) {}
+                }));
+            }
+            Method cvSetDS = class_getInstanceMethod([UICollectionView class], @selector(setDataSource:));
+            if (cvSetDS) {
+                IMP origCVSetDS = method_getImplementation(cvSetDS);
+                method_setImplementation(cvSetDS, imp_implementationWithBlock(^(UICollectionView *self_, id dataSource) {
+                    ((void (*)(id, SEL, id))origCVSetDS)(self_, @selector(setDataSource:), dataSource);
+                    @try {
+                        if (dataSource) ZXSwizzleCollectionViewDataSourceClassIfNeeded(dataSource);
+                    } @catch (__unused NSException *e) {}
+                }));
+            }
+            Method sbSetDel = class_getInstanceMethod([UISearchBar class], @selector(setDelegate:));
+            if (sbSetDel) {
+                IMP origSBSetDel = method_getImplementation(sbSetDel);
+                method_setImplementation(sbSetDel, imp_implementationWithBlock(^(UISearchBar *self_, id delegate) {
+                    ((void (*)(id, SEL, id))origSBSetDel)(self_, @selector(setDelegate:), delegate);
+                    @try {
+                        if (delegate) ZXSwizzleSearchDelegateClassIfNeeded(delegate);
+                    } @catch (__unused NSException *e) {}
+                }));
+            }
+            Method tfSetDel = class_getInstanceMethod([UITextField class], @selector(setDelegate:));
+            if (tfSetDel) {
+                IMP origTFSetDel = method_getImplementation(tfSetDel);
+                method_setImplementation(tfSetDel, imp_implementationWithBlock(^(UITextField *self_, id delegate) {
+                    ((void (*)(id, SEL, id))origTFSetDel)(self_, @selector(setDelegate:), delegate);
+                    @try {
+                        if (delegate) ZXSwizzleSearchDelegateClassIfNeeded(delegate);
+                    } @catch (__unused NSException *e) {}
+                }));
+            }
+            Method sbSetText = class_getInstanceMethod([UISearchBar class], @selector(setText:));
+            if (sbSetText) {
+                IMP origSBSetText = method_getImplementation(sbSetText);
+                method_setImplementation(sbSetText, imp_implementationWithBlock(^(UISearchBar *self_, NSString *text) {
+                    ((void (*)(id, SEL, NSString *))origSBSetText)(self_, @selector(setText:), text);
+                    @try {
+                        ZXNotePotentialSearchText(text, self_);
+                    } @catch (__unused NSException *e) {}
+                }));
+            }
+            Method tfSetText = class_getInstanceMethod([UITextField class], @selector(setText:));
+            if (tfSetText) {
+                IMP origTFSetText = method_getImplementation(tfSetText);
+                method_setImplementation(tfSetText, imp_implementationWithBlock(^(UITextField *self_, NSString *text) {
+                    ((void (*)(id, SEL, NSString *))origTFSetText)(self_, @selector(setText:), text);
+                    @try {
+                        ZXNotePotentialSearchText(text, self_);
                     } @catch (__unused NSException *e) {}
                 }));
             }
@@ -1929,6 +2405,8 @@ static void ZXInstallExtendedFeatureHooks(void)
                 IMP origTVReload = method_getImplementation(tvReload);
                 method_setImplementation(tvReload, imp_implementationWithBlock(^(UITableView *self_) {
                     @try {
+                        if (self_.delegate) ZXSwizzleTableViewDelegateClassIfNeeded(self_.delegate);
+                        if (self_.dataSource) ZXSwizzleTableViewDataSourceClassIfNeeded(self_.dataSource);
                         ((void (*)(id, SEL))origTVReload)(self_, @selector(reloadData));
                         if (self_.window && self_.dataSource) {
                             ZXIndexDataSourceModels(self_.dataSource);
@@ -1941,6 +2419,8 @@ static void ZXInstallExtendedFeatureHooks(void)
                 IMP origCVReload = method_getImplementation(cvReload);
                 method_setImplementation(cvReload, imp_implementationWithBlock(^(UICollectionView *self_) {
                     @try {
+                        if (self_.delegate) ZXSwizzleCollectionViewDelegateClassIfNeeded(self_.delegate);
+                        if (self_.dataSource) ZXSwizzleCollectionViewDataSourceClassIfNeeded(self_.dataSource);
                         ((void (*)(id, SEL))origCVReload)(self_, @selector(reloadData));
                         if (self_.window && self_.dataSource) {
                             ZXIndexDataSourceModels(self_.dataSource);
@@ -2708,92 +3188,155 @@ static void ZXShowBottomBannerOnWindow(UIWindow *win, NSString *msg)
 + (BOOL)openChatWithID:(NSString *)chatID displayName:(NSString *)displayName
 {
     if (chatID.length == 0 && displayName.length == 0) return NO;
-    @try {
-        NSString *cleanDigits = [[(chatID ?: @"") componentsSeparatedByCharactersInSet:
-                                 [[NSCharacterSet decimalDigitCharacterSet] invertedSet]] componentsJoinedByString:@""];
-        NSString *uidArg = (cleanDigits.length >= 5) ? cleanDigits : (chatID ?: @"");
 
-        // Determine the best search query: use real human name if resolved, otherwise raw ID (e.g. 320193294)
-        NSString *query = [displayName ?: @"" stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
-        NSRange idParen = [query rangeOfString:@" (ID:"];
-        if (idParen.location != NSNotFound) {
-            query = [query substringToIndex:idParen.location];
-        }
-        if (query.length == 0 || [query hasPrefix:@"Chưa giải mã"] || [query hasPrefix:@"UID:"] || [query hasPrefix:@"Hội thoại"]) {
-            query = uidArg;
-        }
+    void (^performOpenOnMain)(void) = ^{
+        @try {
+            ZXInitHiddenChatsStore();
 
-        // Always copy query to generalPasteboard as an instant backup
-        [UIPasteboard generalPasteboard].string = query;
+            NSString *cleanDigits = [[(chatID ?: @"") componentsSeparatedByCharactersInSet:
+                                     [[NSCharacterSet decimalDigitCharacterSet] invertedSet]] componentsJoinedByString:@""];
+            NSString *targetUID = (cleanDigits.length >= 5) ? cleanDigits : (chatID ?: @"");
 
-        UIWindow *win = ZXActiveWindow();
-        if (!win) return NO;
-
-        // Step B: Switch Zalo's main UITabBarController to selectedIndex = 0 (Messages tab)
-        UIViewController *root = win.rootViewController;
-        if ([root isKindOfClass:[UITabBarController class]]) {
-            ((UITabBarController *)root).selectedIndex = 0;
-        } else if (root.tabBarController) {
-            root.tabBarController.selectedIndex = 0;
-        } else {
-            for (UIViewController *child in root.childViewControllers) {
-                if ([child isKindOfClass:[UITabBarController class]]) {
-                    ((UITabBarController *)child).selectedIndex = 0;
-                    break;
-                }
+            // Strip any " (ID: ...)" suffix from displayName
+            NSString *candidateName = [displayName ?: @"" stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+            NSRange idParen = [candidateName rangeOfString:@" (ID:"];
+            if (idParen.location != NSNotFound) {
+                candidateName = [candidateName substringToIndex:idParen.location];
             }
-        }
 
-        // Step C: Find Zalo's search bar / search trigger at the top of the main screen (y < 140pt) and activate it
-        UISearchBar *initialSB = ZXFindSearchBarInView(win);
-        UITextField *initialTF = ZXFindSearchTextFieldInView(win);
-        if (initialSB) {
-            [initialSB becomeFirstResponder];
-        } else if (initialTF) {
-            [initialTF becomeFirstResponder];
-        } else {
-            UIView *searchTrigger = ZXFindTopSearchTriggerButton(win, win);
-            if (searchTrigger) {
-                ZXFireTouchAndGesturesOnView(searchTrigger);
-            }
-        }
-
-        // Step D: After 0.45s when the search input opens, fill in the query, notify delegate, and show Toast
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.45 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            @try {
-                UIView *firstResp = ZXFindFirstResponderInView(win);
-                UISearchBar *sb = [firstResp isKindOfClass:[UISearchBar class]] ? (UISearchBar *)firstResp : ZXFindSearchBarInView(win);
-                UITextField *tf = [firstResp isKindOfClass:[UITextField class]] ? (UITextField *)firstResp : ZXFindSearchTextFieldInView(win);
-
-                if (sb) {
-                    if (!sb.isFirstResponder) [sb becomeFirstResponder];
-                    sb.text = query;
-                    if ([sb.delegate respondsToSelector:@selector(searchBar:textDidChange:)]) {
-                        [sb.delegate searchBar:sb textDidChange:query];
+            // Priority check: verify candidateName or look up resolved real name in zx_resolved_profiles.json
+            // STRICT RULE: NEVER allow numeric IDs (threadId/uid/chatId) or placeholder strings ("Hội thoại ẩn cũ...")!
+            NSString *validRealName = @"";
+            if ([ZXScanner isValidHumanDisplayName:candidateName excludeUID:targetUID] && !ZXIsPureDigitsString(candidateName)) {
+                validRealName = candidateName;
+            } else if (targetUID.length > 0) {
+                @synchronized (gResolvedProfilesMap) {
+                    NSDictionary *prof = [gResolvedProfilesMap[targetUID] isKindOfClass:[NSDictionary class]]
+                        ? gResolvedProfilesMap[targetUID]
+                        : ([gResolvedProfilesMap[chatID ?: @""] isKindOfClass:[NSDictionary class]] ? gResolvedProfilesMap[chatID ?: @""] : nil);
+                    NSString *cachedName = [prof[@"name"] description] ?: @"";
+                    if ([ZXScanner isValidHumanDisplayName:cachedName excludeUID:targetUID] && !ZXIsPureDigitsString(cachedName)) {
+                        validRealName = cachedName;
                     }
                 }
-                if (tf) {
-                    if (!tf.isFirstResponder) [tf becomeFirstResponder];
-                    tf.text = @"";
-                    [tf insertText:query];
-                    if (tf.text.length == 0) tf.text = query;
-                    if ([tf.delegate respondsToSelector:@selector(textField:shouldChangeCharactersInRange:replacementString:)]) {
-                        [tf.delegate textField:tf shouldChangeCharactersInRange:NSMakeRange(0, 0) replacementString:query];
-                    }
-                    [tf sendActionsForControlEvents:UIControlEventEditingChanged];
-                    [[NSNotificationCenter defaultCenter] postNotificationName:UITextFieldTextDidChangeNotification object:tf];
-                }
-
-                ZXShowBottomBannerOnWindow(win, @"Đã điền vào ô Tìm kiếm — chạm vào kết quả để mở chat");
-            } @catch (NSException *e) {
-                ZXLog(@"Step D search fill exception: %@", e.reason);
             }
-        });
-        return YES;
-    } @catch (NSException *e) {
-        ZXLog(@"openChatWithID exception: %@", e.reason);
+
+            UIWindow *win = ZXActiveWindow();
+            if (!win) return;
+
+            // Switch Zalo's main UITabBarController to selectedIndex = 0 (Messages tab)
+            UIViewController *root = win.rootViewController;
+            if ([root isKindOfClass:[UITabBarController class]]) {
+                ((UITabBarController *)root).selectedIndex = 0;
+            } else if (root.tabBarController) {
+                root.tabBarController.selectedIndex = 0;
+            } else {
+                for (UIViewController *child in root.childViewControllers) {
+                    if ([child isKindOfClass:[UITabBarController class]]) {
+                        ((UITabBarController *)child).selectedIndex = 0;
+                        break;
+                    }
+                }
+            }
+
+            // Open Zalo's Search bar at top of Messages tab
+            UISearchBar *initialSB = ZXFindSearchBarInView(win);
+            UITextField *initialTF = ZXFindSearchTextFieldInView(win);
+            if (initialSB) {
+                [initialSB becomeFirstResponder];
+            } else if (initialTF) {
+                [initialTF becomeFirstResponder];
+            } else {
+                UIView *searchTrigger = ZXFindTopSearchTriggerButton(win, win);
+                if (searchTrigger) {
+                    ZXFireTouchAndGesturesOnView(searchTrigger);
+                }
+            }
+
+            // Determine Case A (has valid human name) vs Case B (unresolved ID -> check zx_saved_hidden_pin)
+            BOOL hasValidName = (validRealName.length > 0);
+            NSString *savedPin = [[[NSUserDefaults standardUserDefaults] stringForKey:@"zx_saved_hidden_pin"]
+                                  stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+            BOOL hasSavedPin = ZXIsPinCodeString(savedPin);
+
+            if (!hasValidName) {
+                sPendingResolveTargetUID = targetUID;
+                sAwaitingPinSearchResult = YES;
+                if (hasSavedPin) {
+                    sCandidateTypedPIN = savedPin;
+                    sCandidatePinTypedTime = CFAbsoluteTimeGetCurrent();
+                }
+            }
+
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.45 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                @try {
+                    UIWindow *curWin = ZXActiveWindow() ?: win;
+                    if (!curWin) return;
+
+                    UIView *firstResp = ZXFindFirstResponderInView(curWin);
+                    UISearchBar *sb = [firstResp isKindOfClass:[UISearchBar class]] ? (UISearchBar *)firstResp : ZXFindSearchBarInView(curWin);
+                    UITextField *tf = [firstResp isKindOfClass:[UITextField class]] ? (UITextField *)firstResp : ZXFindSearchTextFieldInView(curWin);
+
+                    NSString *textToFill = nil; // nil means keep empty (Case B without saved PIN)
+                    NSString *toastMessage = nil;
+
+                    if (hasValidName) {
+                        // Trường hợp A: Đã có tên thật hợp lệ -> điền CHÍNH XÁC tên thật (không bao giờ điền ID!)
+                        textToFill = validRealName;
+                        toastMessage = @"Đã điền tên vào ô Tìm kiếm — chạm vào kết quả để mở";
+                    } else if (hasSavedPin) {
+                        // Trường hợp B1: Chưa có tên thật nhưng ĐÃ lưu mã PIN ẩn -> điền mã PIN ẩn để Zalo hiện đoạn chat & tự lưu tên
+                        textToFill = savedPin;
+                        toastMessage = @"Đã điền mã PIN ẩn — chọn đoạn chat để xem & lưu tên";
+                    } else {
+                        // Trường hợp B2: Chưa có tên thật & CHƯA có mã PIN -> để trống hoàn toàn ô tìm kiếm
+                        textToFill = nil;
+                        toastMessage = @"Nhập mã PIN ẩn tại đây để Zalo hiện đoạn chat & tự lưu tên";
+                    }
+
+                    if (sb) {
+                        if (!sb.isFirstResponder) [sb becomeFirstResponder];
+                        if (textToFill != nil) {
+                            sb.text = textToFill;
+                            if ([sb.delegate respondsToSelector:@selector(searchBar:textDidChange:)]) {
+                                [sb.delegate searchBar:sb textDidChange:textToFill];
+                            }
+                        } else {
+                            sb.text = @"";
+                        }
+                    }
+                    if (tf) {
+                        if (!tf.isFirstResponder) [tf becomeFirstResponder];
+                        tf.text = @"";
+                        if (textToFill != nil) {
+                            [tf insertText:textToFill];
+                            if (tf.text.length == 0) tf.text = textToFill;
+                            if ([tf.delegate respondsToSelector:@selector(textField:shouldChangeCharactersInRange:replacementString:)]) {
+                                [tf.delegate textField:tf shouldChangeCharactersInRange:NSMakeRange(0, 0) replacementString:textToFill];
+                            }
+                            [tf sendActionsForControlEvents:UIControlEventEditingChanged];
+                            [[NSNotificationCenter defaultCenter] postNotificationName:UITextFieldTextDidChangeNotification object:tf];
+                        }
+                    }
+
+                    if (toastMessage.length > 0) {
+                        ZXShowBottomBannerOnWindow(curWin, toastMessage);
+                    }
+                } @catch (NSException *ex) {
+                    ZXLog(@"openChatWithID search fill exception: %@", ex.reason);
+                }
+            });
+        } @catch (NSException *ex) {
+            ZXLog(@"openChatWithID exception: %@", ex.reason);
+        }
+    };
+
+    if ([NSThread isMainThread]) {
+        performOpenOnMain();
+    } else {
+        dispatch_async(dispatch_get_main_queue(), performOpenOnMain);
     }
-    return NO;
+    return YES;
 }
 
 + (NSURL *)lastVoiceMessageURL
