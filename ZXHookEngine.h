@@ -27,6 +27,7 @@
 + (void)pruneAndRescanHiddenChats;
 + (void)clearResolvedNamesCache;
 + (void)clearResolvedNameForID:(NSString *)chatID;
++ (void)removeHiddenChatEntryWithID:(NSString *)chatID;
 + (BOOL)unhideChatWithID:(NSString *)chatID;
 + (BOOL)openChatWithID:(NSString *)chatID;
 + (BOOL)openChatWithID:(NSString *)chatID displayName:(NSString *)displayName;

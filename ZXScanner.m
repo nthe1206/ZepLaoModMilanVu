@@ -55,16 +55,21 @@ static BOOL ZXIsValidHumanDisplayName(NSString *s, NSString *excludeUID)
 
     NSString *lc = trim.lowercaseString;
     NSArray<NSString *> *badNamePhrases = @[
-        @"coca", @"bulla", @"hội thoại ẩn", @"chưa giải mã", @"không tìm thấy",
-        @"kết quả tìm kiếm", @"nhập mã pin", @"chưa có tin nhắn", @"tìm kiếm gần đây",
-        @"liên hệ gần đây", @"từ khóa tìm kiếm", @"không có kết quả", @"tin nhắn đã được thu hồi",
-        @"vừa truy cập", @"đang nhập", @"cuộc gọi thoại", @"cuộc gọi video", @"official account",
-        @"đã xác thực tên", @"đã xóa tên cũ", @"đã xóa cache"
+        @"ảnh đã hết hạn", @"tin nhắn đã thu hồi", @"tin nhắn đã được thu hồi", @"đã thu hồi",
+        @"hiddenchatentity", @"search/global.sqlite", @"global.sqlite", @".sqlite",
+        @"nhập pin", @"nhập mã pin", @"đang hoạt động", @"vừa xong", @"chạm để", @"xem thêm",
+        @"coca", @"bulla", @"hội thoại ẩn", @"trò chuyện ẩn", @"chưa giải mã", @"không tìm thấy",
+        @"kết quả tìm kiếm", @"chưa có tin nhắn", @"tìm kiếm gần đây", @"liên hệ gần đây",
+        @"từ khóa tìm kiếm", @"không có kết quả", @"vừa truy cập", @"đang nhập",
+        @"cuộc gọi thoại", @"cuộc gọi video", @"cuộc gọi nhỡ", @"official account",
+        @"đã xác thực tên", @"đã xóa tên cũ", @"đã xóa cache", @"đã lưu tên thật"
     ];
     for (NSString *bad in badNamePhrases) {
         if ([lc containsString:bad]) return NO;
     }
-    if ([lc hasPrefix:@"bạn: "] || [lc hasPrefix:@"hoạt động "] || [lc hasPrefix:@"["] || [lc hasPrefix:@"uid:"] || [lc hasPrefix:@"id:"] ||
+    if ([lc hasPrefix:@"bạn: "] || [lc hasPrefix:@"hoạt động "] || [lc hasPrefix:@"["] ||
+        [lc hasPrefix:@"uid:"] || [lc hasPrefix:@"id:"] || [lc hasPrefix:@"tin nhắn ("] ||
+        [lc hasPrefix:@"liên hệ ("] || [lc hasPrefix:@"link ("] || [lc hasPrefix:@"file ("] ||
         [lc isEqualToString:@"đã gửi"] || [lc isEqualToString:@"đã nhận"] || [lc isEqualToString:@"đã xem"]) {
         return NO;
     }
@@ -73,6 +78,7 @@ static BOOL ZXIsValidHumanDisplayName(NSString *s, NSString *excludeUID)
         @"danh bạ", @"khám phá", @"nhật ký", @"cá nhân", @"tìm kiếm",
         @"thông tin", @"liên hệ", @"trò chuyện ẩn", @"mã pin", @"tất cả",
         @"chưa đọc", @"phân loại", @"nhóm", @"bạn bè", @"gợi ý", @"oa",
+        @"link", @"file", @"tệp", @"ảnh", @"video",
         @"options", @"settings", @"messages", @"contacts", @"search"
     ];
     for (NSString *t in uiTitles) {
@@ -489,13 +495,18 @@ static NSArray<NSString *> *ZXCandidateJSONPathsForName(NSString *fileName)
 {
     NSMutableDictionary<NSString *, NSMutableDictionary *> *found = [NSMutableDictionary new];
     @try {
+        NSSet<NSString *> *dismissedKeys = [NSSet setWithArray:([[NSUserDefaults standardUserDefaults] arrayForKey:@"zx_dismissed_hidden_keys"] ?: @[])];
+
         // 1. Source (a): Scan ALL SQLite databases (prioritizing global.sqlite / search/global.sqlite) across Documents, Library, App Groups for HiddenChatEntity
         NSArray<NSString *> *dbPaths = ZXAllZaloSQLitePaths();
         for (NSString *path in dbPaths) {
             ZXScanDatabaseForHiddenIDs(path, found);
         }
+        for (NSString *dk in dismissedKeys) {
+            [found removeObjectForKey:dk];
+        }
 
-        // 2. Source (b): Load ALL saved records from zx_resolved_profiles.json & hidden_chats.json across Documents, ZaloXposed, and Library/Caches
+        // 2. Source (b): Load verified records from zx_resolved_profiles.json & hidden_chats.json (strictly rejecting non-section PIN hits & forbidden names)
         NSMutableDictionary<NSString *, id> *ramProfiles = [NSMutableDictionary new];
         NSString *primaryPath = [self resolvedProfilesPath];
         for (NSString *p in ZXCandidateJSONPathsForName(@"zx_resolved_profiles.json")) {
@@ -507,6 +518,38 @@ static NSArray<NSString *> *ZXCandidateJSONPathsForName(NSString *fileName)
             }
         }
 
+        // Sanitize ramProfiles: purge any entry with forbidden displayName or old un-sectioned pin: search hits
+        BOOL cleanedProfiles = NO;
+        for (NSString *k in [ramProfiles allKeys]) {
+            if ([dismissedKeys containsObject:k] || [k hasPrefix:@"_"]) {
+                [ramProfiles removeObjectForKey:k];
+                cleanedProfiles = YES;
+                continue;
+            }
+            NSDictionary *prof = [ramProfiles[k] isKindOfClass:[NSDictionary class]] ? ramProfiles[k] : nil;
+            if (!prof) {
+                [ramProfiles removeObjectForKey:k];
+                cleanedProfiles = YES;
+                continue;
+            }
+            NSString *pName = [prof[@"name"] description] ?: @"";
+            if (pName.length > 0 && !ZXIsValidHumanDisplayName(pName, k)) {
+                [ramProfiles removeObjectForKey:k];
+                cleanedProfiles = YES;
+                continue;
+            }
+            // Any synthetic pin: item MUST have been captured strictly inside the "Trò chuyện ẩn" section (inHiddenSection == YES)
+            if ([k hasPrefix:@"pin:"] && ![prof[@"inHiddenSection"] boolValue]) {
+                [ramProfiles removeObjectForKey:k];
+                cleanedProfiles = YES;
+                continue;
+            }
+        }
+        if (cleanedProfiles && primaryPath.length > 0) {
+            NSData *cleanOut = [NSJSONSerialization dataWithJSONObject:ramProfiles options:0 error:nil];
+            if (cleanOut) [cleanOut writeToFile:primaryPath atomically:YES];
+        }
+
         for (NSString *hcPath in ZXCandidateJSONPathsForName(@"hidden_chats.json")) {
             NSData *hd = [NSData dataWithContentsOfFile:hcPath];
             if (!hd) continue;
@@ -515,9 +558,18 @@ static NSArray<NSString *> *ZXCandidateJSONPathsForName(NSString *fileName)
                 for (NSDictionary *item in (NSArray *)hArr) {
                     if (![item isKindOfClass:[NSDictionary class]]) continue;
                     NSString *uid = [[item[@"uid"] description] ?: @"" stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
-                    if (uid.length == 0 || ZXIsSystemClassOrEmpty(uid)) continue;
+                    if (uid.length == 0 || ZXIsSystemClassOrEmpty(uid) || [dismissedKeys containsObject:uid]) continue;
+                    NSString *src = [item[@"hiddenSource"] description] ?: @"";
+                    // Reject old un-sectioned PinSearch synthetic rows from previous builds!
+                    if ([uid hasPrefix:@"pin:"] && ![item[@"inHiddenSection"] boolValue]) continue;
+                    if (!found[uid] && ![src isEqualToString:@"HideAction"] && ![item[@"inHiddenSection"] boolValue]) {
+                        continue;
+                    }
                     NSString *rName = [[item[@"rawName"] description] ?: @"" stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
-                    if (!ZXIsValidHumanDisplayName(rName, uid)) rName = @"";
+                    if (!ZXIsValidHumanDisplayName(rName, uid)) {
+                        if ([uid hasPrefix:@"pin:"] || [uid hasPrefix:@"hide:"]) continue;
+                        rName = @"";
+                    }
                     NSString *lMsg = [item[@"lastMessage"] description] ?: @"";
                     if (ZXIsSystemClassOrEmpty(lMsg)) lMsg = @"";
 
@@ -526,7 +578,8 @@ static NSArray<NSString *> *ZXCandidateJSONPathsForName(NSString *fileName)
                             @"uid": uid,
                             @"rawName": rName,
                             @"lastMessage": lMsg,
-                            @"hiddenSource": item[@"hiddenSource"] ?: @"SavedHiddenStore",
+                            @"hiddenSource": src.length ? src : @"PinSearch",
+                            @"inHiddenSection": @([item[@"inHiddenSection"] boolValue]),
                             @"sourceTable": @"hidden_chats.json",
                             @"updatedAt": item[@"updatedAt"] ?: @((long long)[[NSDate date] timeIntervalSince1970])
                         }];
@@ -538,31 +591,31 @@ static NSArray<NSString *> *ZXCandidateJSONPathsForName(NSString *fileName)
             }
         }
 
-        // Also merge hidden items recorded in zx_resolved_profiles.json (from PIN search or Hide action)
+        // Merge verified hidden-section items from zx_resolved_profiles.json
         for (NSString *key in ramProfiles.allKeys) {
-            if ([key hasPrefix:@"_"] || ZXIsSystemClassOrEmpty(key)) continue;
+            if ([key hasPrefix:@"_"] || ZXIsSystemClassOrEmpty(key) || [dismissedKeys containsObject:key]) continue;
             NSDictionary *prof = [ramProfiles[key] isKindOfClass:[NSDictionary class]] ? ramProfiles[key] : nil;
             if (!prof) continue;
-            BOOL isHid = [prof[@"isHidden"] boolValue] || [prof[@"hiddenSource"] length] > 0;
-            if (isHid && !found[key]) {
+            NSString *src = [prof[@"hiddenSource"] description] ?: @"";
+            BOOL allowedStandalone = [src isEqualToString:@"HideAction"] || ([src isEqualToString:@"PinSearch"] && [prof[@"inHiddenSection"] boolValue]);
+            if (allowedStandalone && !found[key]) {
                 NSString *pName = [prof[@"name"] description] ?: @"";
-                if (!ZXIsValidHumanDisplayName(pName, key)) pName = @"";
+                if (!ZXIsValidHumanDisplayName(pName, key)) continue;
                 NSString *pMsg = [prof[@"lastMessage"] description] ?: @"";
                 if (ZXIsSystemClassOrEmpty(pMsg)) pMsg = @"";
                 found[key] = [NSMutableDictionary dictionaryWithDictionary:@{
                     @"uid": key,
                     @"rawName": pName,
                     @"lastMessage": pMsg,
-                    @"hiddenSource": prof[@"hiddenSource"] ?: @"PinSearch",
+                    @"hiddenSource": src,
+                    @"inHiddenSection": @([prof[@"inHiddenSection"] boolValue]),
                     @"sourceTable": @"zx_resolved_profiles.json",
                     @"updatedAt": prof[@"timestamp"] ?: @((long long)[[NSDate date] timeIntervalSince1970])
                 }];
             }
         }
 
-        // 3. Overlay resolved human names from zx_resolved_profiles.json onto HiddenChatEntity IDs
-        NSMutableSet<NSString *> *assignedNames = [NSMutableSet new];
-        NSMutableArray<NSString *> *unresolvedSQLiteUIDs = [NSMutableArray new];
+        // 3. Overlay resolved human names from zx_resolved_profiles.json ONLY by exact matching ID (NEVER blind force-link lone old ID!)
         for (NSString *uid in found) {
             NSMutableDictionary *entry = found[uid];
             NSDictionary *prof = [ramProfiles[uid] isKindOfClass:[NSDictionary class]] ? ramProfiles[uid] : nil;
@@ -578,49 +631,9 @@ static NSArray<NSString *> *ZXCandidateJSONPathsForName(NSString *fileName)
                 NSString *pMsg = [prof[@"lastMessage"] description] ?: @"";
                 if (ZXIsValidHumanDisplayName(pName, uid)) {
                     entry[@"rawName"] = pName;
-                    [assignedNames addObject:pName];
                 }
                 if (pMsg.length > 0 && !ZXIsSystemClassOrEmpty(pMsg)) {
                     entry[@"lastMessage"] = pMsg;
-                }
-            }
-            if ([entry[@"rawName"] length] == 0 && ![uid hasPrefix:@"pin:"]) {
-                [unresolvedSQLiteUIDs addObject:uid];
-            } else if ([entry[@"rawName"] length] > 0) {
-                [assignedNames addObject:entry[@"rawName"]];
-            }
-        }
-
-        // Auto-link if there is 1 unresolved HiddenChatEntity ID and 1 PIN-captured name
-        if (unresolvedSQLiteUIDs.count == 1) {
-            NSString *loneUID = unresolvedSQLiteUIDs.firstObject;
-            NSDictionary *verifiedSingle = [ramProfiles[@"_verified_single_pin_result"] isKindOfClass:[NSDictionary class]]
-                ? ramProfiles[@"_verified_single_pin_result"]
-                : nil;
-            if (verifiedSingle) {
-                NSString *linkedName = [verifiedSingle[@"name"] description] ?: @"";
-                NSString *linkedMsg = [verifiedSingle[@"lastMessage"] description] ?: @"";
-                if (ZXIsValidHumanDisplayName(linkedName, loneUID) && ![assignedNames containsObject:linkedName]) {
-                    NSMutableDictionary *entry = found[loneUID];
-                    entry[@"rawName"] = linkedName;
-                    if (linkedMsg.length > 0 && !ZXIsSystemClassOrEmpty(linkedMsg)) {
-                        entry[@"lastMessage"] = linkedMsg;
-                    }
-                    [found removeObjectForKey:[NSString stringWithFormat:@"pin:%@", linkedName]];
-                    ramProfiles[loneUID] = @{
-                        @"uid": loneUID,
-                        @"name": linkedName,
-                        @"lastMessage": linkedMsg,
-                        @"isHidden": @YES,
-                        @"verified": @YES,
-                        @"hiddenSource": @"PinSearch",
-                        @"timestamp": @((long long)[[NSDate date] timeIntervalSince1970])
-                    };
-                    [ramProfiles removeObjectForKey:@"_verified_single_pin_result"];
-                    NSData *outData = [NSJSONSerialization dataWithJSONObject:ramProfiles options:0 error:nil];
-                    if (outData && primaryPath.length > 0) {
-                        [outData writeToFile:primaryPath atomically:YES];
-                    }
                 }
             }
         }
@@ -630,10 +643,15 @@ static NSArray<NSString *> *ZXCandidateJSONPathsForName(NSString *fileName)
         for (NSString *uid in found) {
             NSMutableDictionary *entry = found[uid];
             NSString *rawName = entry[@"rawName"] ?: @"";
-            BOOL isPinSyntheticKey = [uid hasPrefix:@"pin:"];
+            if (rawName.length > 0 && !ZXIsValidHumanDisplayName(rawName, uid)) {
+                rawName = @"";
+            }
+            BOOL isSyntheticKey = ([uid hasPrefix:@"pin:"] || [uid hasPrefix:@"hide:"]);
+            if (isSyntheticKey && rawName.length == 0) continue;
+
             NSString *displayTitle = nil;
             if (rawName.length > 0) {
-                displayTitle = isPinSyntheticKey ? rawName : [NSString stringWithFormat:@"%@ (ID: %@)", rawName, uid];
+                displayTitle = isSyntheticKey ? rawName : [NSString stringWithFormat:@"%@ (ID: %@)", rawName, uid];
             } else {
                 displayTitle = [NSString stringWithFormat:@"Hội thoại ẩn (ID: %@)", uid];
             }
@@ -642,7 +660,7 @@ static NSArray<NSString *> *ZXCandidateJSONPathsForName(NSString *fileName)
                 NSString *src = entry[@"sourceTable"] ?: @"HiddenChatEntity";
                 lastMsg = rawName.length > 0
                     ? [NSString stringWithFormat:@"Đã lưu tên thật • %@", src]
-                    : [NSString stringWithFormat:@"%@ • Bấm Mở thẳng khung chat & nhập PIN để lưu tên", src];
+                    : [NSString stringWithFormat:@"%@ • Bấm Mở thẳng khung chat & nhập PIN để xem", src];
             }
             [finalList addObject:@{
                 @"uid": uid,
@@ -650,6 +668,7 @@ static NSArray<NSString *> *ZXCandidateJSONPathsForName(NSString *fileName)
                 @"name": displayTitle,
                 @"lastMessage": lastMsg,
                 @"hiddenSource": entry[@"hiddenSource"] ?: @"HiddenChatEntity",
+                @"inHiddenSection": @([entry[@"inHiddenSection"] boolValue]),
                 @"verified": @(rawName.length > 0),
                 @"updatedAt": entry[@"updatedAt"] ?: @0
             }];

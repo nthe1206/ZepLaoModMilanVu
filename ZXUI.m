@@ -567,6 +567,44 @@ static void ZXHookBubbleShow(void)
     cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
     return cell;
 }
+- (BOOL)tableView:(UITableView *)tableView canEditRowAtIndexPath:(NSIndexPath *)indexPath
+{
+    (void)tableView; (void)indexPath;
+    return self.chats.count > 0;
+}
+- (void)deleteHiddenRowAtIndex:(NSInteger)row
+{
+    if (row < 0 || row >= (NSInteger)self.chats.count) return;
+    NSDictionary *c = self.chats[(NSUInteger)row];
+    NSString *uid = [c[@"uid"] description] ?: @"";
+    if (uid.length == 0) return;
+    [ZXHookEngine removeHiddenChatEntryWithID:uid];
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [self reloadChats];
+        ZXShowToast(self.navigationController.view ?: self.view, @"Đã xóa dòng khỏi danh sách Trò chuyện ẩn");
+    });
+}
+- (UISwipeActionsConfiguration *)tableView:(UITableView *)tableView trailingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath API_AVAILABLE(ios(11.0))
+{
+    (void)tableView;
+    if (self.chats.count == 0) return nil;
+    __weak typeof(self) weakSelf = self;
+    UIContextualAction *delAct = [UIContextualAction contextualActionWithStyle:UIContextualActionStyleDestructive
+                                                                         title:@"Xóa"
+                                                                       handler:^(UIContextualAction *action, UIView *sourceView, void (^completionHandler)(BOOL)) {
+        (void)action; (void)sourceView;
+        [weakSelf deleteHiddenRowAtIndex:indexPath.row];
+        if (completionHandler) completionHandler(YES);
+    }];
+    return [UISwipeActionsConfiguration configurationWithActions:@[delAct]];
+}
+- (void)tableView:(UITableView *)tableView commitEditingStyle:(UITableViewCellEditingStyle)editingStyle forRowAtIndexPath:(NSIndexPath *)indexPath
+{
+    (void)tableView;
+    if (editingStyle == UITableViewCellEditingStyleDelete && self.chats.count > 0) {
+        [self deleteHiddenRowAtIndex:indexPath.row];
+    }
+}
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath
 {
     [tableView deselectRowAtIndexPath:indexPath animated:YES];
@@ -618,26 +656,34 @@ static void ZXHookBubbleShow(void)
             }
         });
     }]];
-    [sheet addAction:[UIAlertAction actionWithTitle:@"👁️ Bỏ ẩn nhanh hội thoại này" style:UIAlertActionStyleDefault handler:^(UIAlertAction *act) {
-        (void)act;
-        [ZXHookEngine unhideChatWithID:uid];
-        [self reloadChats];
-        ZXShowToast(self.navigationController.view ?: self.view,
-                    [NSString stringWithFormat:@"Đã bỏ ẩn %@ & cập nhật danh sách Tin nhắn", (hasRealName ? rawName : sheetTitle)]);
-    }]];
+    if (!isSyntheticUID) {
+        [sheet addAction:[UIAlertAction actionWithTitle:@"👁️ Bỏ ẩn nhanh hội thoại này" style:UIAlertActionStyleDefault handler:^(UIAlertAction *act) {
+            (void)act;
+            [ZXHookEngine unhideChatWithID:uid];
+            [self reloadChats];
+            ZXShowToast(self.navigationController.view ?: self.view,
+                        [NSString stringWithFormat:@"Đã bỏ ẩn %@ & cập nhật danh sách Tin nhắn", (hasRealName ? rawName : sheetTitle)]);
+        }]];
+    }
     if (hasRealName) {
         [sheet addAction:[UIAlertAction actionWithTitle:@"📋 Sao chép Tên thật" style:UIAlertActionStyleDefault handler:^(UIAlertAction *act) {
             (void)act;
             [UIPasteboard generalPasteboard].string = verifiedRealName;
             ZXShowToast(self.navigationController.view ?: self.view, @"Đã sao chép tên thật vào bộ nhớ tạm");
         }]];
-        [sheet addAction:[UIAlertAction actionWithTitle:@"🧹 Xóa tên bị gán sai của ID này" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *act) {
-            (void)act;
-            [ZXHookEngine clearResolvedNameForID:uid];
-            [self reloadChats];
-            ZXShowToast(self.navigationController.view ?: self.view, @"Đã xóa tên cũ của hội thoại này");
-        }]];
+        if (!isSyntheticUID) {
+            [sheet addAction:[UIAlertAction actionWithTitle:@"🧹 Xóa tên bị gán sai của ID này" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *act) {
+                (void)act;
+                [ZXHookEngine clearResolvedNameForID:uid];
+                [self reloadChats];
+                ZXShowToast(self.navigationController.view ?: self.view, @"Đã xóa tên cũ của hội thoại này");
+            }]];
+        }
     }
+    [sheet addAction:[UIAlertAction actionWithTitle:@"🗑️ Xóa dòng này khỏi danh sách" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *act) {
+        (void)act;
+        [self deleteHiddenRowAtIndex:indexPath.row];
+    }]];
     [sheet addAction:[UIAlertAction actionWithTitle:@"Đóng" style:UIAlertActionStyleCancel handler:nil]];
     sheet.popoverPresentationController.sourceView = [tableView cellForRowAtIndexPath:indexPath];
     [self presentViewController:sheet animated:YES completion:nil];
