@@ -468,8 +468,8 @@ static void ZXHookBubbleShow(void)
     self.tableView.tableHeaderView = headerWrap;
 
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onHiddenChatsUpdated) name:@"ZXHiddenChatsUpdatedNotification" object:nil];
-    [ZXHookEngine pruneAndRescanHiddenChats];
     self.chats = [ZXHookEngine discoveredHiddenChats] ?: @[];
+    [ZXHookEngine scanMemoryForHiddenChats];
 }
 - (void)onClearWrongNamesTapped
 {
@@ -504,10 +504,14 @@ static void ZXHookBubbleShow(void)
 }
 - (void)onHiddenChatsUpdated
 {
-    self.chats = [ZXHookEngine discoveredHiddenChats] ?: @[];
-    [self.tableView reloadData];
-    ZXShowToast(self.navigationController.view ?: self.view,
-                [NSString stringWithFormat:@"Quét SQLite hoàn tất: %lu hội thoại ẩn", (unsigned long)self.chats.count]);
+    void (^updateUI)(void) = ^{
+        self.chats = [ZXHookEngine discoveredHiddenChats] ?: @[];
+        [self.tableView reloadData];
+        ZXShowToast(self.navigationController.view ?: self.view,
+                    [NSString stringWithFormat:@"Quét hoàn tất: %lu hội thoại ẩn", (unsigned long)self.chats.count]);
+    };
+    if ([NSThread isMainThread]) updateUI();
+    else dispatch_async(dispatch_get_main_queue(), updateUI);
 }
 - (void)reloadChats
 {
@@ -516,8 +520,8 @@ static void ZXHookBubbleShow(void)
 }
 - (void)rescanAndReload
 {
-    ZXShowToast(self.navigationController.view ?: self.view, @"Đang lọc sạch mục thừa & quét lại HiddenChatEntity...");
-    [ZXHookEngine pruneAndRescanHiddenChats];
+    ZXShowToast(self.navigationController.view ?: self.view, @"Đang quét lại HiddenChatEntity & gộp dữ liệu ẩn...");
+    [ZXHookEngine scanMemoryForHiddenChats];
 }
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section
 {
@@ -548,11 +552,16 @@ static void ZXHookBubbleShow(void)
     NSString *rawName = [c[@"rawName"] description] ?: @"";
     NSString *src = [c[@"hiddenSource"] description] ?: @"HiddenChatEntity";
     NSString *srcBadge = [src isEqualToString:@"HideAction"] ? @"Vừa ẩn"
-                       : ([src isEqualToString:@"PinSearch"] ? @"Mã PIN ẩn" : @"HiddenChatEntity");
+                       : ([src isEqualToString:@"PinSearch"] ? @"Mã PIN ẩn"
+                       : ([src isEqualToString:@"SavedHiddenStore"] ? @"Đã lưu" : @"HiddenChatEntity"));
     BOOL hasRealName = [ZXScanner isValidHumanDisplayName:rawName excludeUID:uid];
-    NSString *titleText = hasRealName
-        ? [NSString stringWithFormat:@"%@ (ID: %@)", rawName, uid]
-        : [NSString stringWithFormat:@"Hội thoại ẩn cũ (ID: %@)", uid];
+    BOOL isSyntheticUID = ([uid hasPrefix:@"pin:"] || [uid hasPrefix:@"hide:"]);
+    NSString *titleText = nil;
+    if (hasRealName) {
+        titleText = isSyntheticUID ? rawName : [NSString stringWithFormat:@"%@ (ID: %@)", rawName, uid];
+    } else {
+        titleText = [NSString stringWithFormat:@"Hội thoại ẩn (ID: %@)", uid];
+    }
     cell.textLabel.text = titleText;
     cell.detailTextLabel.text = [NSString stringWithFormat:@"[%@] • %@", srcBadge, c[@"lastMessage"] ?: @"(Trống)"];
     cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
@@ -566,11 +575,12 @@ static void ZXHookBubbleShow(void)
     NSString *uid = [c[@"uid"] description] ?: @"";
     NSString *rawName = [c[@"rawName"] description] ?: @"";
     BOOL hasRealName = [ZXScanner isValidHumanDisplayName:rawName excludeUID:uid];
-    // STRICT RULE: NEVER pass numeric uid or "Hội thoại ẩn cũ..." placeholder as a search name!
+    BOOL isSyntheticUID = ([uid hasPrefix:@"pin:"] || [uid hasPrefix:@"hide:"]);
+    // STRICT RULE: NEVER pass numeric uid or "Hội thoại ẩn..." placeholder as a search name!
     NSString *verifiedRealName = hasRealName ? rawName : @"";
     NSString *sheetTitle = hasRealName
-        ? [NSString stringWithFormat:@"%@ (ID: %@)", rawName, uid]
-        : [NSString stringWithFormat:@"Hội thoại ẩn cũ (ID: %@)", uid];
+        ? (isSyntheticUID ? rawName : [NSString stringWithFormat:@"%@ (ID: %@)", rawName, uid])
+        : [NSString stringWithFormat:@"Hội thoại ẩn (ID: %@)", uid];
 
     UIAlertController *sheet = [UIAlertController alertControllerWithTitle:sheetTitle
                                                                    message:[NSString stringWithFormat:@"%@", c[@"lastMessage"] ?: @""]
