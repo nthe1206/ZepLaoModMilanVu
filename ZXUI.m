@@ -460,7 +460,7 @@ static void ZXHookBubbleShow(void)
     clearCacheBtn.layer.cornerRadius = 10;
     clearCacheBtn.layer.borderWidth = 1.0;
     clearCacheBtn.layer.borderColor = ZXColorZaloRed().CGColor;
-    [clearCacheBtn setTitle:@"🗑️ Xóa cache tên bị gán sai & Quét lại" forState:UIControlStateNormal];
+    [clearCacheBtn setTitle:@"🧹 Lọc mục thừa & Xóa cache tên sai" forState:UIControlStateNormal];
     [clearCacheBtn setTitleColor:ZXColorZaloRed() forState:UIControlStateNormal];
     clearCacheBtn.titleLabel.font = [UIFont systemFontOfSize:13.5 weight:UIFontWeightBold];
     [clearCacheBtn addTarget:self action:@selector(onClearWrongNamesTapped) forControlEvents:UIControlEventTouchUpInside];
@@ -468,22 +468,29 @@ static void ZXHookBubbleShow(void)
     self.tableView.tableHeaderView = headerWrap;
 
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onHiddenChatsUpdated) name:@"ZXHiddenChatsUpdatedNotification" object:nil];
+    [ZXHookEngine pruneAndRescanHiddenChats];
     self.chats = [ZXHookEngine discoveredHiddenChats] ?: @[];
-    [ZXHookEngine scanMemoryForHiddenChats];
 }
 - (void)onClearWrongNamesTapped
 {
-    UIAlertController *confirm = [UIAlertController alertControllerWithTitle:@"Xóa cache tên đã lưu?"
-                                                                     message:@"Xóa toàn bộ tên cũ trong zx_resolved_profiles.json để làm sạch tên bị gán nhầm và quét lại từ đầu."
-                                                              preferredStyle:UIAlertControllerStyleAlert];
+    UIAlertController *confirm = [UIAlertController alertControllerWithTitle:@"Làm sạch danh sách Trò chuyện ẩn"
+                                                                     message:@"Chọn thao tác làm sạch dữ liệu ẩn trên thiết bị:"
+                                                              preferredStyle:UIAlertControllerStyleActionSheet];
     if (@available(iOS 13.0, *)) confirm.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
-    [confirm addAction:[UIAlertAction actionWithTitle:@"Hủy" style:UIAlertActionStyleCancel handler:nil]];
-    [confirm addAction:[UIAlertAction actionWithTitle:@"Xóa sạch & Quét lại" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *act) {
+    [confirm addAction:[UIAlertAction actionWithTitle:@"🔍 Chỉ lọc bỏ mục thừa (giữ tên đã xác thực)" style:UIAlertActionStyleDefault handler:^(UIAlertAction *act) {
+        (void)act;
+        [ZXHookEngine pruneAndRescanHiddenChats];
+        [self reloadChats];
+        ZXShowToast(self.navigationController.view ?: self.view, @"Đã lọc sạch các cuộc trò chuyện bình thường");
+    }]];
+    [confirm addAction:[UIAlertAction actionWithTitle:@"🗑️ Xóa toàn bộ cache tên & Quét lại từ đầu" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *act) {
         (void)act;
         [ZXHookEngine clearResolvedNamesCache];
         [self reloadChats];
-        ZXShowToast(self.navigationController.view ?: self.view, @"Đã xóa sạch cache tên trong zx_resolved_profiles.json");
+        ZXShowToast(self.navigationController.view ?: self.view, @"Đã xóa sạch zx_resolved_profiles.json & quét lại");
     }]];
+    [confirm addAction:[UIAlertAction actionWithTitle:@"Hủy" style:UIAlertActionStyleCancel handler:nil]];
+    confirm.popoverPresentationController.sourceView = self.tableView.tableHeaderView ?: self.view;
     [self presentViewController:confirm animated:YES completion:nil];
 }
 - (void)dealloc
@@ -509,8 +516,8 @@ static void ZXHookBubbleShow(void)
 }
 - (void)rescanAndReload
 {
-    ZXShowToast(self.navigationController.view ?: self.view, @"Đang quét cơ sở dữ liệu SQLite trên luồng nền...");
-    [ZXHookEngine scanMemoryForHiddenChats];
+    ZXShowToast(self.navigationController.view ?: self.view, @"Đang lọc sạch mục thừa & quét lại HiddenChatEntity...");
+    [ZXHookEngine pruneAndRescanHiddenChats];
 }
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section
 {
@@ -539,12 +546,15 @@ static void ZXHookBubbleShow(void)
     NSDictionary *c = self.chats[indexPath.row];
     NSString *uid = [c[@"uid"] description] ?: @"?";
     NSString *rawName = [c[@"rawName"] description] ?: @"";
+    NSString *src = [c[@"hiddenSource"] description] ?: @"HiddenChatEntity";
+    NSString *srcBadge = [src isEqualToString:@"HideAction"] ? @"Vừa ẩn"
+                       : ([src isEqualToString:@"PinSearch"] ? @"Mã PIN ẩn" : @"HiddenChatEntity");
     BOOL hasRealName = [ZXScanner isValidHumanDisplayName:rawName excludeUID:uid];
     NSString *titleText = hasRealName
         ? [NSString stringWithFormat:@"%@ (ID: %@)", rawName, uid]
         : [NSString stringWithFormat:@"Hội thoại ẩn cũ (ID: %@)", uid];
     cell.textLabel.text = titleText;
-    cell.detailTextLabel.text = [NSString stringWithFormat:@"Tin cuối: %@", c[@"lastMessage"] ?: @"(Trống)"];
+    cell.detailTextLabel.text = [NSString stringWithFormat:@"[%@] • %@", srcBadge, c[@"lastMessage"] ?: @"(Trống)"];
     cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
     return cell;
 }

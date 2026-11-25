@@ -24,6 +24,7 @@
 // NTHE Extended Features
 + (NSArray<NSDictionary *> *)discoveredHiddenChats;
 + (void)scanMemoryForHiddenChats;
++ (void)pruneAndRescanHiddenChats;
 + (void)clearResolvedNamesCache;
 + (void)clearResolvedNameForID:(NSString *)chatID;
 + (BOOL)unhideChatWithID:(NSString *)chatID;
