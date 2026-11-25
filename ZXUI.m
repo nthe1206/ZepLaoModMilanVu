@@ -450,9 +450,41 @@ static void ZXHookBubbleShow(void)
     self.tableView.backgroundColor = ZXColorBgPrimary();
     self.tableView.separatorColor = ZXColorCardBorder();
     self.navigationItem.rightBarButtonItem = ZXMakeNavButton(@"arrow.clockwise.circle.fill", @"Quét lại", ZXColorZaloRed(), self, @selector(rescanAndReload));
+
+    UIView *headerWrap = [[UIView alloc] initWithFrame:CGRectMake(0, 0, UIScreen.mainScreen.bounds.size.width, 56)];
+    headerWrap.backgroundColor = UIColor.clearColor;
+    UIButton *clearCacheBtn = [UIButton buttonWithType:UIButtonTypeCustom];
+    clearCacheBtn.frame = CGRectMake(16, 10, headerWrap.bounds.size.width - 32, 40);
+    clearCacheBtn.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+    clearCacheBtn.backgroundColor = [UIColor colorWithRed:0.898 green:0.224 blue:0.208 alpha:0.16];
+    clearCacheBtn.layer.cornerRadius = 10;
+    clearCacheBtn.layer.borderWidth = 1.0;
+    clearCacheBtn.layer.borderColor = ZXColorZaloRed().CGColor;
+    [clearCacheBtn setTitle:@"🗑️ Xóa cache tên bị gán sai & Quét lại" forState:UIControlStateNormal];
+    [clearCacheBtn setTitleColor:ZXColorZaloRed() forState:UIControlStateNormal];
+    clearCacheBtn.titleLabel.font = [UIFont systemFontOfSize:13.5 weight:UIFontWeightBold];
+    [clearCacheBtn addTarget:self action:@selector(onClearWrongNamesTapped) forControlEvents:UIControlEventTouchUpInside];
+    [headerWrap addSubview:clearCacheBtn];
+    self.tableView.tableHeaderView = headerWrap;
+
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onHiddenChatsUpdated) name:@"ZXHiddenChatsUpdatedNotification" object:nil];
     self.chats = [ZXHookEngine discoveredHiddenChats] ?: @[];
     [ZXHookEngine scanMemoryForHiddenChats];
+}
+- (void)onClearWrongNamesTapped
+{
+    UIAlertController *confirm = [UIAlertController alertControllerWithTitle:@"Xóa cache tên đã lưu?"
+                                                                     message:@"Xóa toàn bộ tên cũ trong zx_resolved_profiles.json để làm sạch tên bị gán nhầm và quét lại từ đầu."
+                                                              preferredStyle:UIAlertControllerStyleAlert];
+    if (@available(iOS 13.0, *)) confirm.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
+    [confirm addAction:[UIAlertAction actionWithTitle:@"Hủy" style:UIAlertActionStyleCancel handler:nil]];
+    [confirm addAction:[UIAlertAction actionWithTitle:@"Xóa sạch & Quét lại" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *act) {
+        (void)act;
+        [ZXHookEngine clearResolvedNamesCache];
+        [self reloadChats];
+        ZXShowToast(self.navigationController.view ?: self.view, @"Đã xóa sạch cache tên trong zx_resolved_profiles.json");
+    }]];
+    [self presentViewController:confirm animated:YES completion:nil];
 }
 - (void)dealloc
 {
@@ -578,6 +610,12 @@ static void ZXHookBubbleShow(void)
             (void)act;
             [UIPasteboard generalPasteboard].string = verifiedRealName;
             ZXShowToast(self.navigationController.view ?: self.view, @"Đã sao chép tên thật vào bộ nhớ tạm");
+        }]];
+        [sheet addAction:[UIAlertAction actionWithTitle:@"🧹 Xóa tên bị gán sai của ID này" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *act) {
+            (void)act;
+            [ZXHookEngine clearResolvedNameForID:uid];
+            [self reloadChats];
+            ZXShowToast(self.navigationController.view ?: self.view, @"Đã xóa tên cũ của hội thoại này");
         }]];
     }
     [sheet addAction:[UIAlertAction actionWithTitle:@"Đóng" style:UIAlertActionStyleCancel handler:nil]];

@@ -45,7 +45,7 @@ static NSString *sCandidateTypedPIN;
 static double sCandidatePinTypedTime = 0.0;
 static NSString *sPendingResolveTargetUID;
 static BOOL sAwaitingPinSearchResult = NO;
-static NSMutableArray<NSString *> *sCurrentPinResultNames;
+static NSInteger sPinVerifyGen = 0;
 
 // Spam state
 static BOOL gSpamRunning;
@@ -142,19 +142,23 @@ static void ZXInitHiddenChatsStore(void)
         gHiddenChatsMap = [NSMutableDictionary new];
         gResolvedProfilesMap = [NSMutableDictionary new];
         gUnlockedSessionChats = [NSMutableSet new];
-        sCurrentPinResultNames = [NSMutableArray new];
         NSArray *savedUnhidden = [[NSUserDefaults standardUserDefaults] arrayForKey:@"nthe_unhidden_thread_ids"];
         sUnhiddenThreadIDs = [NSMutableSet setWithArray:(savedUnhidden ?: @[])];
         @try {
-            NSString *legacyProfPath = [[ZXConfig dataDir] stringByAppendingPathComponent:@"zx_resolved_profiles.json"];
             NSString *primaryProfPath = [ZXScanner resolvedProfilesPath];
-            for (NSString *pp in @[legacyProfPath, primaryProfPath]) {
-                if (pp.length == 0) continue;
-                NSData *pData = [NSData dataWithContentsOfFile:pp];
+            if (primaryProfPath.length > 0) {
+                NSData *pData = [NSData dataWithContentsOfFile:primaryProfPath];
                 if (pData) {
                     id pDict = [NSJSONSerialization JSONObjectWithData:pData options:0 error:nil];
                     if ([pDict isKindOfClass:[NSDictionary class]]) {
-                        [gResolvedProfilesMap addEntriesFromDictionary:(NSDictionary *)pDict];
+                        NSDictionary *rawMap = (NSDictionary *)pDict;
+                        for (NSString *k in rawMap) {
+                            id val = rawMap[k];
+                            // Only load entries explicitly marked verified == YES so old polluted names are discarded!
+                            if ([val isKindOfClass:[NSDictionary class]] && [val[@"verified"] boolValue]) {
+                                gResolvedProfilesMap[k] = val;
+                            }
+                        }
                     }
                 }
             }
@@ -171,7 +175,19 @@ static void ZXInitHiddenChatsStore(void)
                             continue;
                         }
                         if ([sUnhiddenThreadIDs containsObject:uid]) continue;
-                        gHiddenChatsMap[uid] = item;
+                        // Discard unverified rawName from older builds so wrong account names never linger
+                        if (![item[@"verified"] boolValue]) {
+                            gHiddenChatsMap[uid] = @{
+                                @"uid": uid,
+                                @"rawName": @"",
+                                @"name": [NSString stringWithFormat:@"Hội thoại ẩn cũ (ID: %@)", uid],
+                                @"lastMessage": @"Bấm Mở thẳng khung chat & nhập PIN để lưu đúng tên",
+                                @"verified": @NO,
+                                @"updatedAt": item[@"updatedAt"] ?: @0
+                            };
+                        } else {
+                            gHiddenChatsMap[uid] = item;
+                        }
                     }
                 }
             }
@@ -187,10 +203,8 @@ static void ZXSaveResolvedProfilesNow(void)
         @synchronized (gResolvedProfilesMap) {
             snap = [gResolvedProfilesMap copy];
         }
-        if (snap.count > 0) {
-            NSData *d = [NSJSONSerialization dataWithJSONObject:snap options:0 error:nil];
-            if (d) [d writeToFile:[ZXScanner resolvedProfilesPath] atomically:YES];
-        }
+        NSData *d = [NSJSONSerialization dataWithJSONObject:(snap ?: @{}) options:0 error:nil];
+        if (d) [d writeToFile:[ZXScanner resolvedProfilesPath] atomically:YES];
     } @catch (__unused NSException *e) {}
 }
 
@@ -231,33 +245,31 @@ static NSString *ZXReadStringKVC(id obj, NSArray<NSString *> *keys)
     return @"";
 }
 
-static void ZXRecordResolvedProfile(NSString *uid, NSString *name, NSString *lastMsg, BOOL isHidden)
+/// Records a STRICTLY VERIFIED hidden chat profile (only from PIN search selection/single-row or newly hidden chat diff).
+static void ZXRecordVerifiedHiddenProfile(NSString *uid, NSString *name, NSString *lastMsg)
 {
     if (uid.length < 4 || [ZXScanner isGarbageChatIdentifier:uid]) return;
-    if (![ZXScanner isValidHumanDisplayName:name excludeUID:uid]) name = @"";
+    if (![ZXScanner isValidHumanDisplayName:name excludeUID:uid]) return;
     if ([ZXScanner isGarbageChatIdentifier:lastMsg]) lastMsg = @"";
-    if (name.length == 0 && lastMsg.length == 0 && !isHidden) return;
 
     ZXInitHiddenChatsStore();
     NSString *cleanDigits = [[uid componentsSeparatedByCharactersInSet:
                              [[NSCharacterSet decimalDigitCharacterSet] invertedSet]] componentsJoinedByString:@""];
-    NSString *mergedName = name;
-    NSString *mergedMsg = lastMsg;
-    BOOL mergedHidden = isHidden;
+    NSString *mergedMsg = lastMsg ?: @"";
     long long nowTs = (long long)[[NSDate date] timeIntervalSince1970];
 
     @synchronized (gResolvedProfilesMap) {
         NSDictionary *old = gResolvedProfilesMap[uid] ?: (cleanDigits.length >= 5 ? gResolvedProfilesMap[cleanDigits] : nil);
-        if (mergedName.length == 0) mergedName = old[@"name"] ?: @"";
-        if (mergedMsg.length == 0) mergedMsg = old[@"lastMessage"] ?: @"";
-        mergedHidden = isHidden || [old[@"isHidden"] boolValue];
-        if ([sUnhiddenThreadIDs containsObject:uid]) mergedHidden = NO;
+        if (mergedMsg.length == 0 && [old isKindOfClass:[NSDictionary class]]) {
+            mergedMsg = old[@"lastMessage"] ?: @"";
+        }
 
         NSDictionary *entry = @{
             @"uid": uid,
-            @"name": mergedName,
+            @"name": name,
             @"lastMessage": mergedMsg,
-            @"isHidden": @(mergedHidden),
+            @"isHidden": @YES,
+            @"verified": @YES,
             @"timestamp": @(nowTs)
         };
         gResolvedProfilesMap[uid] = entry;
@@ -267,26 +279,21 @@ static void ZXRecordResolvedProfile(NSString *uid, NSString *name, NSString *las
     }
     ZXScheduleSaveResolvedProfiles();
 
-    // If this ID matches an existing hidden chat (e.g. from HiddenChatEntity) or is flagged hidden, update hidden_chats.json immediately
     BOOL updatedHiddenStore = NO;
     @synchronized (gHiddenChatsMap) {
         NSString *matchedKey = nil;
         if (gHiddenChatsMap[uid]) matchedKey = uid;
         else if (cleanDigits.length >= 5 && gHiddenChatsMap[cleanDigits]) matchedKey = cleanDigits;
 
-        if (matchedKey || (mergedHidden && ![sUnhiddenThreadIDs containsObject:uid])) {
+        if (![sUnhiddenThreadIDs containsObject:uid]) {
             NSString *storeKey = matchedKey ?: uid;
-            NSDictionary *prev = gHiddenChatsMap[storeKey];
-            NSString *finalName = mergedName.length > 0 ? mergedName : (prev[@"rawName"] ?: @"");
-            NSString *finalMsg = mergedMsg.length > 0 ? mergedMsg : (prev[@"lastMessage"] ?: @"");
-            NSString *displayTitle = finalName.length > 0
-                ? [NSString stringWithFormat:@"%@ (ID: %@)", finalName, storeKey]
-                : [NSString stringWithFormat:@"Hội thoại ẩn cũ (ID: %@)", storeKey];
+            NSString *displayTitle = [NSString stringWithFormat:@"%@ (ID: %@)", name, storeKey];
             gHiddenChatsMap[storeKey] = @{
                 @"uid": storeKey,
-                @"rawName": finalName,
+                @"rawName": name,
                 @"name": displayTitle,
-                @"lastMessage": finalMsg.length > 0 ? finalMsg : @"Đã giải mã từ RAM",
+                @"lastMessage": mergedMsg.length > 0 ? mergedMsg : @"Đã xác thực tên thật qua mã PIN ẩn",
+                @"verified": @YES,
                 @"updatedAt": @(nowTs)
             };
             ZXSaveHiddenChatsStore();
@@ -298,158 +305,6 @@ static void ZXRecordResolvedProfile(NSString *uid, NSString *name, NSString *las
             [[NSNotificationCenter defaultCenter] postNotificationName:@"ZXHiddenChatsUpdatedNotification" object:nil];
         });
     }
-}
-
-static void ZXCollectCellLabelTexts(UIView *v, NSMutableArray<NSString *> *outTexts, int depth)
-{
-    if (!v || v.hidden || v.alpha < 0.05 || depth > 4 || outTexts.count >= 4) return;
-    if ([v isKindOfClass:[UILabel class]]) {
-        NSString *t = [[(UILabel *)v text] ?: @"" stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
-        if (t.length >= 2 && ![ZXScanner isGarbageChatIdentifier:t]) {
-            [outTexts addObject:t];
-        }
-    }
-    for (UIView *sub in v.subviews) {
-        ZXCollectCellLabelTexts(sub, outTexts, depth + 1);
-    }
-}
-
-/// Safely indexes a decrypted Zalo model object in RAM (ZAContact, ZAUser, ZAChat, ZAThread, search result...) into zx_resolved_profiles.json & hidden_chats.json.
-static void ZXIndexDecryptedModelObject(id obj)
-{
-    if (!obj || [obj isKindOfClass:[UIView class]] || [obj isKindOfClass:[UIViewController class]]) return;
-    @try {
-        NSString *cn = NSStringFromClass([obj class]);
-        if ([cn hasPrefix:@"UI"] || [cn hasPrefix:@"NS"] || [cn hasPrefix:@"_"] || [cn hasPrefix:@"ZX"]) return;
-
-        NSString *uid = ZXReadStringKVC(obj, @[@"userId", @"uid", @"threadId", @"conversationId", @"contactId", @"friendId", @"groupId", @"chatId", @"targetId", @"zaloId", @"entityId", @"peerId"]);
-        if (uid.length < 4 || [ZXScanner isGarbageChatIdentifier:uid]) return;
-
-        NSString *name = ZXReadStringKVC(obj, @[@"displayName", @"dName", @"name", @"threadName", @"title", @"contactName", @"userName", @"zaloName", @"fullName", @"aliasName", @"groupName"]);
-        if (![ZXScanner isValidHumanDisplayName:name excludeUID:uid]) name = @"";
-
-        NSString *lastMsg = ZXReadStringKVC(obj, @[@"lastMessage", @"lastMsgText", @"snippet", @"content", @"lastMessageContent", @"lastMessageDisplay", @"message", @"text", @"subtitle", @"desc"]);
-        if ([ZXScanner isGarbageChatIdentifier:lastMsg]) lastMsg = @"";
-
-        BOOL isHidden = NO;
-        for (NSString *hk in @[@"isHidden", @"isHiddenChat", @"isHiddenConversation", @"hiddenType", @"hideStatus", @"isHide"]) {
-            if ([obj respondsToSelector:NSSelectorFromString(hk)]) {
-                id hv = [obj valueForKey:hk];
-                if ([hv respondsToSelector:@selector(integerValue)] && [hv integerValue] > 0) {
-                    isHidden = YES;
-                    if ([ZXConfig boolForKey:ZXK_UNHIDE_CHATS]) {
-                        @try { [obj setValue:@0 forKey:hk]; } @catch (__unused NSException *e) {}
-                    }
-                    break;
-                }
-            }
-        }
-
-        ZXRecordResolvedProfile(uid, name, lastMsg, isHidden);
-    } @catch (__unused NSException *e) {}
-}
-
-static void ZXIndexModelOrCollection(id obj, int depth)
-{
-    if (!obj || depth > 2) return;
-    @try {
-        if ([obj isKindOfClass:[NSArray class]]) {
-            NSArray *arr = (NSArray *)obj;
-            NSUInteger limit = MIN(arr.count, (NSUInteger)60);
-            for (NSUInteger i = 0; i < limit; i++) {
-                ZXIndexModelOrCollection(arr[i], depth + 1);
-            }
-            return;
-        }
-        if ([obj isKindOfClass:[NSDictionary class]]) {
-            NSDictionary *dict = (NSDictionary *)obj;
-            NSUInteger count = 0;
-            for (id val in dict.allValues) {
-                if (count++ >= 60) break;
-                ZXIndexModelOrCollection(val, depth + 1);
-            }
-            return;
-        }
-        if ([obj isKindOfClass:[NSSet class]]) {
-            NSUInteger count = 0;
-            for (id val in (NSSet *)obj) {
-                if (count++ >= 60) break;
-                ZXIndexModelOrCollection(val, depth + 1);
-            }
-            return;
-        }
-        ZXIndexDecryptedModelObject(obj);
-    } @catch (__unused NSException *e) {}
-}
-
-static void ZXIndexCellAndSubviews(UIView *cell)
-{
-    if (!cell) return;
-    @try {
-        NSArray<NSString *> *modelProps = @[
-            @"chatEntity", @"item", @"chatItem", @"entity", @"model", @"contact", @"user",
-            @"thread", @"conversation", @"viewModel", @"data", @"chatObject", @"searchResult",
-            @"result", @"profile", @"cellModel", @"cellData", @"object"
-        ];
-        NSString *foundUID = @"";
-        for (NSString *prop in modelProps) {
-            if ([cell respondsToSelector:NSSelectorFromString(prop)]) {
-                id model = [cell valueForKey:prop];
-                if (!model) continue;
-                ZXIndexDecryptedModelObject(model);
-                if (foundUID.length == 0) {
-                    NSString *u = ZXReadStringKVC(model, @[@"userId", @"uid", @"threadId", @"conversationId", @"contactId", @"friendId", @"groupId", @"chatId", @"targetId", @"zaloId", @"entityId"]);
-                    if (u.length >= 4 && ![ZXScanner isGarbageChatIdentifier:u]) foundUID = u;
-                }
-                // Also inspect nested ZAContact/ZAUser/ZAThread inside viewModel/item wrappers
-                for (NSString *subProp in @[@"contact", @"user", @"thread", @"chatEntity", @"conversation", @"entity", @"item", @"model", @"profile"]) {
-                    if ([model respondsToSelector:NSSelectorFromString(subProp)]) {
-                        id subModel = [model valueForKey:subProp];
-                        if (subModel) {
-                            ZXIndexDecryptedModelObject(subModel);
-                            if (foundUID.length == 0) {
-                                NSString *u2 = ZXReadStringKVC(subModel, @[@"userId", @"uid", @"threadId", @"conversationId", @"contactId", @"friendId", @"groupId", @"chatId"]);
-                                if (u2.length >= 4 && ![ZXScanner isGarbageChatIdentifier:u2]) foundUID = u2;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        // Fallback: if cell holds a model UID and displays the decrypted human name on its UILabels (e.g. Search / PIN hidden chat results)
-        if (foundUID.length >= 4) {
-            NSMutableArray<NSString *> *labels = [NSMutableArray new];
-            ZXCollectCellLabelTexts(cell, labels, 0);
-            NSString *lblName = @"";
-            NSString *lblMsg = @"";
-            for (NSString *t in labels) {
-                if (lblName.length == 0 && [ZXScanner isValidHumanDisplayName:t excludeUID:foundUID]) {
-                    lblName = t;
-                } else if (lblName.length > 0 && lblMsg.length == 0 && ![t isEqualToString:lblName]) {
-                    lblMsg = t;
-                    break;
-                }
-            }
-            if (lblName.length > 0) {
-                ZXRecordResolvedProfile(foundUID, lblName, lblMsg, NO);
-            }
-        }
-    } @catch (__unused NSException *e) {}
-}
-
-static void ZXIndexDataSourceModels(id dataSource)
-{
-    if (!dataSource) return;
-    @try {
-        NSString *cn = NSStringFromClass([dataSource class]);
-        if ([cn hasPrefix:@"ZX"] || [cn hasPrefix:@"UI"] || [cn hasPrefix:@"_"]) return;
-        for (NSString *prop in @[@"items", @"dataList", @"dataSource", @"contacts", @"conversations", @"threads", @"chats", @"hiddenChats", @"searchResults", @"results", @"filteredResults", @"users", @"entities", @"models", @"sections", @"listData", @"data"]) {
-            if ([dataSource respondsToSelector:NSSelectorFromString(prop)]) {
-                id val = [dataSource valueForKey:prop];
-                if (val) ZXIndexModelOrCollection(val, 0);
-            }
-        }
-    } @catch (__unused NSException *e) {}
 }
 
 // ---- Hide-Chat Real Name Capture (Cách 1: Swipe/LongPress, Cách 2: Chat Options Switch, Cách 3: PIN Search Capture) ----
@@ -634,14 +489,12 @@ static void ZXNotePotentialSearchText(NSString *text, UIView *sourceView)
         }
         NSString *trim = [text ?: @"" stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
         if (ZXIsPinCodeString(trim)) {
-            ZXInitHiddenChatsStore();
-            if (![sCandidateTypedPIN isEqualToString:trim]) {
-                @synchronized (gResolvedProfilesMap) {
-                    [sCurrentPinResultNames removeAllObjects];
-                }
-            }
             sCandidateTypedPIN = trim;
             sCandidatePinTypedTime = CFAbsoluteTimeGetCurrent();
+        } else if (trim.length > 6) {
+            // Normal non-PIN text search -> clear PIN candidate immediately so normal search rows are never treated as PIN results!
+            sCandidateTypedPIN = nil;
+            sCandidatePinTypedTime = 0.0;
         }
     } @catch (__unused NSException *e) {}
 }
@@ -662,22 +515,36 @@ static NSString *ZXCurrentPinInWindow(UIWindow *win)
     return @"";
 }
 
-static void ZXHandleSearchOrPinResultCell(UIView *cell, UIView *listView, BOOL wasSelected)
+static BOOL ZXIsSearchListContainer(UIView *listView)
+{
+    if (!listView || !listView.window) return NO;
+    @try {
+        UIViewController *vc = ZXNearestViewControllerForView(listView);
+        while (vc) {
+            NSString *cls = NSStringFromClass([vc class]);
+            if ([cls hasPrefix:@"ZX"]) return NO;
+            if ([cls rangeOfString:@"Search" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+                [cls rangeOfString:@"Pin" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+                [cls rangeOfString:@"Hidden" options:NSCaseInsensitiveSearch].location != NSNotFound) {
+                return YES;
+            }
+            vc = vc.parentViewController;
+        }
+    } @catch (__unused NSException *e) {}
+    return NO;
+}
+
+/// Strictly handles ONLY the exact cell tapped by the user (didSelectRowAtIndexPath: / didSelectItemAtIndexPath:) right after entering a 4-6 digit PIN.
+static void ZXHandleSelectedPinResultCell(UIView *cell, UIView *listView)
 {
     if (!cell || !listView) return;
     @try {
-        UIViewController *ownerVC = ZXNearestViewControllerForView(listView);
-        NSString *vcCls = ownerVC ? NSStringFromClass([ownerVC class]) : @"";
-        if ([vcCls hasPrefix:@"ZX"]) return;
+        if (!ZXIsSearchListContainer(listView)) return;
 
         NSString *activeWindowPin = ZXCurrentPinInWindow(listView.window);
         double elapsedSincePin = CFAbsoluteTimeGetCurrent() - sCandidatePinTypedTime;
-        BOOL recentPinTyped = (sCandidateTypedPIN.length >= 4 && elapsedSincePin >= 0.0 && elapsedSincePin <= 25.0) || (activeWindowPin.length >= 4);
-        BOOL isSearchVC = ([vcCls rangeOfString:@"Search" options:NSCaseInsensitiveSearch].location != NSNotFound ||
-                           [vcCls rangeOfString:@"Pin" options:NSCaseInsensitiveSearch].location != NSNotFound ||
-                           [vcCls rangeOfString:@"Hidden" options:NSCaseInsensitiveSearch].location != NSNotFound);
-
-        if (!recentPinTyped && !sAwaitingPinSearchResult && !isSearchVC) return;
+        BOOL verifiedPinActive = (activeWindowPin.length >= 4) || (sCandidateTypedPIN.length >= 4 && elapsedSincePin >= 0.0 && elapsedSincePin <= 15.0);
+        if (!verifiedPinActive) return;
 
         NSString *displayName = @"";
         NSString *lastMsg = @"";
@@ -685,78 +552,154 @@ static void ZXHandleSearchOrPinResultCell(UIView *cell, UIView *listView, BOOL w
         ZXExtractBestNameAndMsgFromCell(cell, &displayName, &lastMsg, &cellUID);
         if (![ZXScanner isValidHumanDisplayName:displayName excludeUID:cellUID]) return;
 
-        ZXInitHiddenChatsStore();
-        long long nowTs = (long long)[[NSDate date] timeIntervalSince1970];
-
-        // 1. If a 4-6 digit PIN was just entered and Zalo displayed a valid chat result cell, save PIN to NSUserDefaults!
-        NSString *confirmedPin = activeWindowPin.length >= 4 ? activeWindowPin : (recentPinTyped ? sCandidateTypedPIN : @"");
+        NSString *confirmedPin = activeWindowPin.length >= 4 ? activeWindowPin : sCandidateTypedPIN;
         if (ZXIsPinCodeString(confirmedPin)) {
             [[NSUserDefaults standardUserDefaults] setObject:confirmedPin forKey:@"zx_saved_hidden_pin"];
-            @synchronized (gResolvedProfilesMap) {
-                if (![sCurrentPinResultNames containsObject:displayName]) {
-                    [sCurrentPinResultNames addObject:displayName];
-                }
-                NSMutableDictionary *pinItems = [gResolvedProfilesMap[@"_pin_captured_items"] isKindOfClass:[NSDictionary class]]
-                    ? [gResolvedProfilesMap[@"_pin_captured_items"] mutableCopy]
-                    : [NSMutableDictionary new];
-                pinItems[displayName] = @{
-                    @"name": displayName,
-                    @"lastMessage": lastMsg ?: @"",
-                    @"timestamp": @(nowTs)
-                };
-                gResolvedProfilesMap[@"_pin_captured_items"] = pinItems;
-                if (wasSelected) {
-                    gResolvedProfilesMap[@"_last_pin_selected"] = @{
-                        @"name": displayName,
-                        @"lastMessage": lastMsg ?: @"",
-                        @"timestamp": @(nowTs)
-                    };
-                }
-            }
         }
 
-        // 2. If cell model directly exposed a valid threadId/uid, record immediately
-        if (cellUID.length >= 4 && ![ZXScanner isGarbageChatIdentifier:cellUID]) {
-            ZXRecordResolvedProfile(cellUID, displayName, lastMsg, recentPinTyped);
-        }
+        NSString *pendingUID = sPendingResolveTargetUID;
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+            @try {
+                NSArray<NSString *> *hiddenIDs = [ZXScanner currentHiddenChatEntityIDs];
+                NSSet<NSString *> *hiddenSet = [NSSet setWithArray:hiddenIDs ?: @[]];
 
-        // 3. Auto-link displayName to HiddenChatEntity ID when user tapped result or when there is 1 unresolved hidden ID & 1 PIN result
-        if (recentPinTyped || sAwaitingPinSearchResult) {
-            NSString *pendingUID = sPendingResolveTargetUID;
-            if (wasSelected && pendingUID.length >= 4 && ![ZXScanner isGarbageChatIdentifier:pendingUID]) {
-                ZXRecordResolvedProfile(pendingUID, displayName, lastMsg, YES);
-                sPendingResolveTargetUID = nil;
-                sAwaitingPinSearchResult = NO;
-                ZXSaveResolvedProfilesNow();
-                return;
-            }
-
-            dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-                @try {
-                    NSArray<NSString *> *hiddenIDs = [ZXScanner currentHiddenChatEntityIDs];
-                    NSMutableArray<NSString *> *unresolved = [NSMutableArray new];
-                    NSUInteger pinCount = 0;
-                    @synchronized (gResolvedProfilesMap) {
-                        pinCount = sCurrentPinResultNames.count;
-                        for (NSString *hid in hiddenIDs) {
-                            NSDictionary *prof = [gResolvedProfilesMap[hid] isKindOfClass:[NSDictionary class]] ? gResolvedProfilesMap[hid] : nil;
-                            NSString *existingName = [prof[@"name"] description] ?: @"";
-                            if (![ZXScanner isValidHumanDisplayName:existingName excludeUID:hid]) {
-                                [unresolved addObject:hid];
-                            }
-                        }
-                    }
-                    if (unresolved.count == 1 && (wasSelected || pinCount == 1)) {
-                        NSString *loneID = unresolved.firstObject;
-                        ZXRecordResolvedProfile(loneID, displayName, lastMsg, YES);
-                        sPendingResolveTargetUID = nil;
-                        sAwaitingPinSearchResult = NO;
-                        ZXLog(@"Linked PIN search result '%@' -> HiddenChatEntity ID %@", displayName, loneID);
-                    }
+                // 1. Exact UID on the tapped cell matches HiddenChatEntity
+                if (cellUID.length >= 4 && [hiddenSet containsObject:cellUID]) {
+                    ZXRecordVerifiedHiddenProfile(cellUID, displayName, lastMsg);
+                    sPendingResolveTargetUID = nil;
+                    sAwaitingPinSearchResult = NO;
                     ZXSaveResolvedProfilesNow();
-                } @catch (__unused NSException *e) {}
-            });
-        }
+                    return;
+                }
+
+                // 2. User clicked "Mở thẳng khung chat" on a specific target ID in thanhthe, entered PIN, and tapped this chat
+                if (pendingUID.length >= 4 && [hiddenSet containsObject:pendingUID]) {
+                    ZXRecordVerifiedHiddenProfile(pendingUID, displayName, lastMsg);
+                    sPendingResolveTargetUID = nil;
+                    sAwaitingPinSearchResult = NO;
+                    ZXSaveResolvedProfilesNow();
+                    return;
+                }
+
+                // 3. Only 1 unresolved hidden ID exists in HiddenChatEntity
+                NSMutableArray<NSString *> *unresolved = [NSMutableArray new];
+                @synchronized (gResolvedProfilesMap) {
+                    for (NSString *hid in hiddenIDs) {
+                        NSDictionary *prof = [gResolvedProfilesMap[hid] isKindOfClass:[NSDictionary class]] ? gResolvedProfilesMap[hid] : nil;
+                        BOOL ok = [prof[@"verified"] boolValue] && [ZXScanner isValidHumanDisplayName:[prof[@"name"] description] excludeUID:hid];
+                        if (!ok) [unresolved addObject:hid];
+                    }
+                }
+                if (unresolved.count == 1) {
+                    ZXRecordVerifiedHiddenProfile(unresolved.firstObject, displayName, lastMsg);
+                    sPendingResolveTargetUID = nil;
+                    sAwaitingPinSearchResult = NO;
+                } else {
+                    @synchronized (gResolvedProfilesMap) {
+                        gResolvedProfilesMap[@"_verified_single_pin_result"] = @{
+                            @"name": displayName,
+                            @"lastMessage": lastMsg ?: @"",
+                            @"verified": @YES,
+                            @"timestamp": @((long long)[[NSDate date] timeIntervalSince1970])
+                        };
+                    }
+                }
+                ZXSaveResolvedProfilesNow();
+            } @catch (__unused NSException *e) {}
+        });
+    } @catch (__unused NSException *e) {}
+}
+
+/// Debounced check AFTER Search table/collection finishes rendering when a 4-6 digit PIN is actively in the Search bar.
+/// NEVER grabs row 0 of a multi-row list! Only links automatically if the entire PIN search list shows STRICTLY 1 valid chat cell.
+static void ZXScheduleVerifySinglePinResultInList(UIView *listView)
+{
+    if (!listView || !listView.window) return;
+    @try {
+        if (!ZXIsSearchListContainer(listView)) return;
+        NSString *activePin = ZXCurrentPinInWindow(listView.window);
+        if (!ZXIsPinCodeString(activePin)) return;
+
+        NSInteger myGen = ++sPinVerifyGen;
+        __weak UIView *weakList = listView;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.45 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            @try {
+                if (myGen != sPinVerifyGen) return;
+                UIView *strongList = weakList;
+                if (!strongList || !strongList.window) return;
+
+                // Re-verify the 4-6 digit PIN is STILL in Zalo's search input right now!
+                NSString *stillPin = ZXCurrentPinInWindow(strongList.window);
+                if (!ZXIsPinCodeString(stillPin)) return;
+
+                NSArray<UIView *> *visCells = nil;
+                NSInteger totalRows = 0;
+                if ([strongList isKindOfClass:[UITableView class]]) {
+                    UITableView *tv = (UITableView *)strongList;
+                    visCells = tv.visibleCells;
+                    NSInteger secs = [tv numberOfSections];
+                    for (NSInteger s = 0; s < secs; s++) totalRows += [tv numberOfRowsInSection:s];
+                } else if ([strongList isKindOfClass:[UICollectionView class]]) {
+                    UICollectionView *cv = (UICollectionView *)strongList;
+                    visCells = cv.visibleCells;
+                    NSInteger secs = [cv numberOfSections];
+                    for (NSInteger s = 0; s < secs; s++) totalRows += [cv numberOfItemsInSection:s];
+                }
+
+                // Collect valid chat cells currently visible in the PIN search result list
+                NSMutableArray<NSDictionary *> *validResults = [NSMutableArray new];
+                for (UIView *c in visCells) {
+                    NSString *cName = @"";
+                    NSString *cMsg = @"";
+                    NSString *cUID = @"";
+                    ZXExtractBestNameAndMsgFromCell(c, &cName, &cMsg, &cUID);
+                    if ([ZXScanner isValidHumanDisplayName:cName excludeUID:cUID]) {
+                        [validResults addObject:@{
+                            @"name": cName,
+                            @"msg": cMsg ?: @"",
+                            @"uid": cUID ?: @""
+                        }];
+                    }
+                }
+
+                if (validResults.count == 0) return;
+
+                // Only save PIN & auto-link when the PIN search clearly narrowed down to 1 single hidden chat row (not a 10+ row contact list!)
+                if (totalRows <= 2 && validResults.count == 1) {
+                    [[NSUserDefaults standardUserDefaults] setObject:stillPin forKey:@"zx_saved_hidden_pin"];
+                    NSDictionary *onlyHit = validResults.firstObject;
+                    NSString *hitName = onlyHit[@"name"];
+                    NSString *hitMsg = onlyHit[@"msg"];
+                    NSString *hitUID = onlyHit[@"uid"];
+
+                    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+                        @try {
+                            NSArray<NSString *> *hiddenIDs = [ZXScanner currentHiddenChatEntityIDs];
+                            NSSet<NSString *> *hiddenSet = [NSSet setWithArray:hiddenIDs ?: @[]];
+                            if (hitUID.length >= 4 && [hiddenSet containsObject:hitUID]) {
+                                ZXRecordVerifiedHiddenProfile(hitUID, hitName, hitMsg);
+                                ZXSaveResolvedProfilesNow();
+                                return;
+                            }
+                            NSMutableArray<NSString *> *unresolved = [NSMutableArray new];
+                            @synchronized (gResolvedProfilesMap) {
+                                for (NSString *hid in hiddenIDs) {
+                                    NSDictionary *prof = [gResolvedProfilesMap[hid] isKindOfClass:[NSDictionary class]] ? gResolvedProfilesMap[hid] : nil;
+                                    BOOL ok = [prof[@"verified"] boolValue] && [ZXScanner isValidHumanDisplayName:[prof[@"name"] description] excludeUID:hid];
+                                    if (!ok) [unresolved addObject:hid];
+                                }
+                            }
+                            if (unresolved.count == 1) {
+                                ZXRecordVerifiedHiddenProfile(unresolved.firstObject, hitName, hitMsg);
+                                sPendingResolveTargetUID = nil;
+                                sAwaitingPinSearchResult = NO;
+                                ZXSaveResolvedProfilesNow();
+                            }
+                        } @catch (__unused NSException *e) {}
+                    });
+                }
+            } @catch (__unused NSException *e) {}
+        });
     } @catch (__unused NSException *e) {}
 }
 
@@ -798,39 +741,28 @@ static void ZXCommitHideChatWithName(NSString *chatName, NSString *lastMsg, NSSt
 
         ZXLog(@"Commit hide chat detected: name='%@' knownUID='%@'", cleanName, knownUID ?: @"");
 
-        if (knownUID.length >= 4 && ![ZXScanner isGarbageChatIdentifier:knownUID]) {
-            ZXRecordResolvedProfile(knownUID, cleanName, cleanMsg, YES);
-        }
-
         NSSet<NSString *> *beforeSnap = sHiddenIDsBeforeAction;
-        // Poll HiddenChatEntity twice (0.6s and 1.8s) to catch the newly inserted ID after Zalo writes SQLite / PIN confirmation
+        // Poll HiddenChatEntity twice (0.6s and 1.8s) to catch ONLY a newly inserted ID (strict diff: afterIDs - beforeSnap == 1 ID)
         for (NSNumber *delaySec in @[@0.6, @1.8]) {
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delaySec.doubleValue * NSEC_PER_SEC)),
                            dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
                 @try {
                     NSArray<NSString *> *afterIDs = [ZXScanner currentHiddenChatEntityIDs];
-                    NSString *matchedNewID = nil;
+                    if (knownUID.length >= 4 && [afterIDs containsObject:knownUID]) {
+                        ZXRecordVerifiedHiddenProfile(knownUID, cleanName, cleanMsg);
+                        sHiddenIDsBeforeAction = [NSSet setWithArray:afterIDs ?: @[]];
+                        return;
+                    }
+                    if (!beforeSnap) return; // Never guess without a pre-hide snapshot!
+                    NSMutableArray<NSString *> *added = [NSMutableArray new];
                     for (NSString *cid in afterIDs) {
-                        if (beforeSnap && ![beforeSnap containsObject:cid]) {
-                            matchedNewID = cid;
-                            break;
+                        if (![beforeSnap containsObject:cid]) {
+                            [added addObject:cid];
                         }
                     }
-                    // Fallback: if no diff snapshot was available yet, check if there is an unresolved ID in HiddenChatEntity
-                    if (!matchedNewID && (!beforeSnap || beforeSnap.count == 0)) {
-                        ZXInitHiddenChatsStore();
-                        @synchronized (gResolvedProfilesMap) {
-                            for (NSString *cid in afterIDs) {
-                                NSDictionary *p = gResolvedProfilesMap[cid];
-                                if (!p || [p[@"name"] length] == 0) {
-                                    matchedNewID = cid;
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                    if (matchedNewID.length >= 4) {
-                        ZXRecordResolvedProfile(matchedNewID, cleanName, cleanMsg, YES);
+                    if (added.count == 1) {
+                        NSString *matchedNewID = added.firstObject;
+                        ZXRecordVerifiedHiddenProfile(matchedNewID, cleanName, cleanMsg);
                         sHiddenIDsBeforeAction = [NSSet setWithArray:afterIDs ?: @[]];
                         ZXLog(@"Mapped newly hidden ID %@ -> '%@'", matchedNewID, cleanName);
                     }
@@ -896,12 +828,16 @@ static void ZXCaptureOpenChatInfo(UIViewController *vc)
             sCurrentOpenChatName = name;
             if (uid.length >= 4 && ![ZXScanner isGarbageChatIdentifier:uid]) {
                 sCurrentOpenChatUID = uid;
-                ZXRecordResolvedProfile(uid, name, @"", NO);
             }
             ZXLog(@"Captured open chat info: '%@' (uid=%@)", name, uid ?: @"");
             dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
                 NSArray<NSString *> *ids = [ZXScanner currentHiddenChatEntityIDs];
                 sHiddenIDsBeforeAction = [NSSet setWithArray:ids ?: @[]];
+                // If this opened chat VC has an exact threadId/uid present in HiddenChatEntity, verify & save its real title!
+                if (uid.length >= 4 && [sHiddenIDsBeforeAction containsObject:uid]) {
+                    ZXRecordVerifiedHiddenProfile(uid, name, @"");
+                    ZXSaveResolvedProfilesNow();
+                }
             });
         }
     } @catch (__unused NSException *e) {}
@@ -948,7 +884,7 @@ static void ZXSwizzleTableViewDelegateClassIfNeeded(id delegate)
             }));
         }
 
-        // Hook tableView:didSelectRowAtIndexPath: (capture tapped hidden result after PIN entry)
+        // Hook tableView:didSelectRowAtIndexPath: (capture ONLY tapped hidden result after PIN entry)
         SEL selSelect = @selector(tableView:didSelectRowAtIndexPath:);
         Method mSelect = class_getInstanceMethod(cls, selSelect);
         if (mSelect) {
@@ -956,7 +892,7 @@ static void ZXSwizzleTableViewDelegateClassIfNeeded(id delegate)
             method_setImplementation(mSelect, imp_implementationWithBlock(^(id self_, UITableView *tv, NSIndexPath *ip) {
                 @try {
                     UITableViewCell *cell = [tv cellForRowAtIndexPath:ip];
-                    if (cell) ZXHandleSearchOrPinResultCell(cell, tv, YES);
+                    if (cell) ZXHandleSelectedPinResultCell(cell, tv);
                 } @catch (__unused NSException *e) {}
                 ((void (*)(id, SEL, UITableView *, NSIndexPath *))origSelect)(self_, selSelect, tv, ip);
             }));
@@ -984,7 +920,7 @@ static void ZXSwizzleTableViewDataSourceClassIfNeeded(id dataSource)
             method_setImplementation(mCell, imp_implementationWithBlock(^UITableViewCell *(id self_, UITableView *tv, NSIndexPath *ip) {
                 UITableViewCell *cell = ((UITableViewCell *(*)(id, SEL, UITableView *, NSIndexPath *))origCell)(self_, selCell, tv, ip);
                 @try {
-                    if (cell) ZXHandleSearchOrPinResultCell(cell, tv, NO);
+                    if (cell) ZXScheduleVerifySinglePinResultInList(tv);
                 } @catch (__unused NSException *e) {}
                 return cell;
             }));
@@ -1012,7 +948,7 @@ static void ZXSwizzleCollectionViewDelegateClassIfNeeded(id delegate)
             method_setImplementation(mSelect, imp_implementationWithBlock(^(id self_, UICollectionView *cv, NSIndexPath *ip) {
                 @try {
                     UICollectionViewCell *cell = [cv cellForItemAtIndexPath:ip];
-                    if (cell) ZXHandleSearchOrPinResultCell(cell, cv, YES);
+                    if (cell) ZXHandleSelectedPinResultCell(cell, cv);
                 } @catch (__unused NSException *e) {}
                 ((void (*)(id, SEL, UICollectionView *, NSIndexPath *))origSelect)(self_, selSelect, cv, ip);
             }));
@@ -1040,7 +976,7 @@ static void ZXSwizzleCollectionViewDataSourceClassIfNeeded(id dataSource)
             method_setImplementation(mCell, imp_implementationWithBlock(^UICollectionViewCell *(id self_, UICollectionView *cv, NSIndexPath *ip) {
                 UICollectionViewCell *cell = ((UICollectionViewCell *(*)(id, SEL, UICollectionView *, NSIndexPath *))origCell)(self_, selCell, cv, ip);
                 @try {
-                    if (cell) ZXHandleSearchOrPinResultCell(cell, cv, NO);
+                    if (cell) ZXScheduleVerifySinglePinResultInList(cv);
                 } @catch (__unused NSException *e) {}
                 return cell;
             }));
@@ -2122,7 +2058,6 @@ static void ZXAttachLockShieldIfNeeded(UIViewController *vc)
         if (!looksLikeChat) return;
 
         gActiveChatVC = vc;
-        ZXIndexDecryptedModelObject(vc);
         ZXFindChatInputView(vc.view);
         if (![ZXConfig boolForKey:ZXK_CHAT_LOCK_ENABLED]) return;
 
@@ -2365,7 +2300,7 @@ static void ZXInstallExtendedFeatureHooks(void)
                 }));
             }
 
-            // 2. Hook UITableViewCell & UICollectionViewCell -didMoveToWindow + UITableView/UICollectionView -reloadData for RAM profile indexing
+            // 2. Hook UITableViewCell -didMoveToWindow ONLY for attaching long-press quick menu (NO blind cell scraping!)
             Method dmw = class_getInstanceMethod([UITableViewCell class], @selector(didMoveToWindow));
             if (dmw) {
                 IMP origDMW = method_getImplementation(dmw);
@@ -2375,7 +2310,6 @@ static void ZXInstallExtendedFeatureHooks(void)
                         if (!self_.window) return;
                         NSString *cn = NSStringFromClass([self_ class]);
                         if ([cn hasPrefix:@"ZX"]) return;
-                        ZXIndexCellAndSubviews(self_);
                         static const char kLPKey;
                         if (!objc_getAssociatedObject(self_, &kLPKey)) {
                             UILongPressGestureRecognizer *lp = [[UILongPressGestureRecognizer alloc] initWithTarget:[ZXUIRuntimeHelper class] action:@selector(onCellLongPress:)];
@@ -2387,19 +2321,6 @@ static void ZXInstallExtendedFeatureHooks(void)
                     } @catch (__unused NSException *e) {}
                 }));
             }
-            Method cvCellDmw = class_getInstanceMethod([UICollectionViewCell class], @selector(didMoveToWindow));
-            if (cvCellDmw) {
-                IMP origCVDMW = method_getImplementation(cvCellDmw);
-                method_setImplementation(cvCellDmw, imp_implementationWithBlock(^(UICollectionViewCell *self_) {
-                    @try {
-                        ((void (*)(id, SEL))origCVDMW)(self_, @selector(didMoveToWindow));
-                        if (!self_.window) return;
-                        NSString *cn = NSStringFromClass([self_ class]);
-                        if ([cn hasPrefix:@"ZX"]) return;
-                        ZXIndexCellAndSubviews(self_);
-                    } @catch (__unused NSException *e) {}
-                }));
-            }
             Method tvReload = class_getInstanceMethod([UITableView class], @selector(reloadData));
             if (tvReload) {
                 IMP origTVReload = method_getImplementation(tvReload);
@@ -2408,9 +2329,6 @@ static void ZXInstallExtendedFeatureHooks(void)
                         if (self_.delegate) ZXSwizzleTableViewDelegateClassIfNeeded(self_.delegate);
                         if (self_.dataSource) ZXSwizzleTableViewDataSourceClassIfNeeded(self_.dataSource);
                         ((void (*)(id, SEL))origTVReload)(self_, @selector(reloadData));
-                        if (self_.window && self_.dataSource) {
-                            ZXIndexDataSourceModels(self_.dataSource);
-                        }
                     } @catch (__unused NSException *e) {}
                 }));
             }
@@ -2422,9 +2340,6 @@ static void ZXInstallExtendedFeatureHooks(void)
                         if (self_.delegate) ZXSwizzleCollectionViewDelegateClassIfNeeded(self_.delegate);
                         if (self_.dataSource) ZXSwizzleCollectionViewDataSourceClassIfNeeded(self_.dataSource);
                         ((void (*)(id, SEL))origCVReload)(self_, @selector(reloadData));
-                        if (self_.window && self_.dataSource) {
-                            ZXIndexDataSourceModels(self_.dataSource);
-                        }
                     } @catch (__unused NSException *e) {}
                 }));
             }
@@ -3157,6 +3072,77 @@ static void ZXShowBottomBannerOnWindow(UIWindow *win, NSString *msg)
     }
 }
 
++ (void)clearResolvedNamesCache
+{
+    @try {
+        ZXInitHiddenChatsStore();
+        @synchronized (gResolvedProfilesMap) {
+            [gResolvedProfilesMap removeAllObjects];
+        }
+        NSFileManager *fm = [NSFileManager defaultManager];
+        NSString *primaryPath = [ZXScanner resolvedProfilesPath];
+        NSString *legacyPath = [[ZXConfig dataDir] stringByAppendingPathComponent:@"zx_resolved_profiles.json"];
+        if (primaryPath.length) [fm removeItemAtPath:primaryPath error:nil];
+        if (legacyPath.length) [fm removeItemAtPath:legacyPath error:nil];
+
+        @synchronized (gHiddenChatsMap) {
+            for (NSString *uid in [gHiddenChatsMap allKeys]) {
+                gHiddenChatsMap[uid] = @{
+                    @"uid": uid,
+                    @"rawName": @"",
+                    @"name": [NSString stringWithFormat:@"Hội thoại ẩn cũ (ID: %@)", uid],
+                    @"lastMessage": @"Đã xóa cache tên cũ • Bấm Mở thẳng khung chat & nhập PIN để lưu đúng tên",
+                    @"verified": @NO,
+                    @"updatedAt": @((long long)[[NSDate date] timeIntervalSince1970])
+                };
+            }
+            ZXSaveHiddenChatsStore();
+        }
+        sPendingResolveTargetUID = nil;
+        sAwaitingPinSearchResult = NO;
+        [self scanMemoryForHiddenChats];
+    } @catch (NSException *e) {
+        ZXLog(@"clearResolvedNamesCache exception: %@", e.reason);
+    }
+}
+
++ (void)clearResolvedNameForID:(NSString *)chatID
+{
+    if (chatID.length == 0) return;
+    @try {
+        ZXInitHiddenChatsStore();
+        NSString *cleanDigits = [[chatID componentsSeparatedByCharactersInSet:
+                                 [[NSCharacterSet decimalDigitCharacterSet] invertedSet]] componentsJoinedByString:@""];
+        @synchronized (gResolvedProfilesMap) {
+            [gResolvedProfilesMap removeObjectForKey:chatID];
+            if (cleanDigits.length >= 5) [gResolvedProfilesMap removeObjectForKey:cleanDigits];
+            [gResolvedProfilesMap removeObjectForKey:@"_verified_single_pin_result"];
+        }
+        ZXSaveResolvedProfilesNow();
+
+        @synchronized (gHiddenChatsMap) {
+            for (NSString *key in @[chatID, (cleanDigits.length >= 5 ? cleanDigits : chatID)]) {
+                if (gHiddenChatsMap[key]) {
+                    gHiddenChatsMap[key] = @{
+                        @"uid": key,
+                        @"rawName": @"",
+                        @"name": [NSString stringWithFormat:@"Hội thoại ẩn cũ (ID: %@)", key],
+                        @"lastMessage": @"Đã xóa tên cũ • Bấm Mở thẳng khung chat & nhập PIN để lưu đúng tên",
+                        @"verified": @NO,
+                        @"updatedAt": @((long long)[[NSDate date] timeIntervalSince1970])
+                    };
+                }
+            }
+            ZXSaveHiddenChatsStore();
+        }
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [[NSNotificationCenter defaultCenter] postNotificationName:@"ZXHiddenChatsUpdatedNotification" object:nil];
+        });
+    } @catch (NSException *e) {
+        ZXLog(@"clearResolvedNameForID exception: %@", e.reason);
+    }
+}
+
 + (BOOL)unhideChatWithID:(NSString *)chatID
 {
     if (chatID.length == 0) return NO;
@@ -3214,9 +3200,11 @@ static void ZXShowBottomBannerOnWindow(UIWindow *win, NSString *msg)
                     NSDictionary *prof = [gResolvedProfilesMap[targetUID] isKindOfClass:[NSDictionary class]]
                         ? gResolvedProfilesMap[targetUID]
                         : ([gResolvedProfilesMap[chatID ?: @""] isKindOfClass:[NSDictionary class]] ? gResolvedProfilesMap[chatID ?: @""] : nil);
-                    NSString *cachedName = [prof[@"name"] description] ?: @"";
-                    if ([ZXScanner isValidHumanDisplayName:cachedName excludeUID:targetUID] && !ZXIsPureDigitsString(cachedName)) {
-                        validRealName = cachedName;
+                    if ([prof[@"verified"] boolValue]) {
+                        NSString *cachedName = [prof[@"name"] description] ?: @"";
+                        if ([ZXScanner isValidHumanDisplayName:cachedName excludeUID:targetUID] && !ZXIsPureDigitsString(cachedName)) {
+                            validRealName = cachedName;
+                        }
                     }
                 }
             }

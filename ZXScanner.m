@@ -20,15 +20,22 @@ static BOOL ZXIsGarbageString(NSString *s)
         @"sqlite_master", @"sqlite_sequence", @"http://", @"https://",
         @"/var/", @"/private/", @"/library/", @"/documents/", @".png", @".jpg", @".sqlite",
         @"coca", @"bulla", @"hội thoại ẩn cũ", @"chưa giải mã", @"không tìm thấy",
-        @"kết quả tìm kiếm", @"nhập mã pin", @"chưa có tin nhắn"
+        @"kết quả tìm kiếm", @"nhập mã pin", @"chưa có tin nhắn", @"tìm kiếm gần đây",
+        @"liên hệ gần đây", @"từ khóa tìm kiếm", @"không có kết quả", @"tin nhắn đã được thu hồi",
+        @"vừa truy cập", @"đang nhập", @"cuộc gọi thoại", @"cuộc gọi video", @"official account"
     ];
     for (NSString *bad in badSubstrings) {
         if ([lc containsString:bad]) return YES;
     }
+    if ([lc hasPrefix:@"bạn: "] || [lc hasPrefix:@"hoạt động "] || [lc hasPrefix:@"["] ||
+        [lc isEqualToString:@"đã gửi"] || [lc isEqualToString:@"đã nhận"] || [lc isEqualToString:@"đã xem"]) {
+        return YES;
+    }
     NSArray<NSString *> *uiTitles = @[
         @"tùy chọn", @"cài đặt", @"ẩn trò chuyện", @"ẩn hội thoại", @"tin nhắn",
         @"danh bạ", @"khám phá", @"nhật ký", @"cá nhân", @"tìm kiếm",
-        @"thông tin", @"liên hệ", @"trò chuyện ẩn", @"mã pin",
+        @"thông tin", @"liên hệ", @"trò chuyện ẩn", @"mã pin", @"tất cả",
+        @"chưa đọc", @"phân loại", @"nhóm", @"bạn bè", @"gợi ý", @"oa",
         @"options", @"settings", @"messages", @"contacts", @"search"
     ];
     for (NSString *t in uiTitles) {
@@ -42,12 +49,12 @@ static BOOL ZXIsGarbageString(NSString *s)
     return NO;
 }
 
-/// Checks if a candidate string is a valid human/group display name (2-60 chars, has letters, not a URL/path/UUID/number).
+/// Checks if a candidate string is a valid human/group display name (2-50 chars, has letters, not phone/time/status/class/placeholder).
 static BOOL ZXIsValidHumanDisplayName(NSString *s, NSString *excludeUID)
 {
     if (!s) return NO;
     NSString *trim = [s stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
-    if (trim.length < 2 || trim.length > 60) return NO;
+    if (trim.length < 2 || trim.length > 50) return NO;
     if (excludeUID.length && [trim isEqualToString:excludeUID]) return NO;
     if (ZXIsGarbageString(trim)) return NO;
 
@@ -55,17 +62,24 @@ static BOOL ZXIsValidHumanDisplayName(NSString *s, NSString *excludeUID)
     NSRange letterRange = [trim rangeOfCharacterFromSet:[NSCharacterSet letterCharacterSet]];
     if (letterRange.location == NSNotFound) return NO;
 
+    // Reject phone numbers or strings dominated by digits (e.g. +84..., 0912..., timestamps)
+    NSUInteger digitCount = 0;
+    for (NSUInteger i = 0; i < trim.length; i++) {
+        unichar c = [trim characterAtIndex:i];
+        if (c >= '0' && c <= '9') digitCount++;
+        if (c < 32 || c == 0xFFFD) return NO;
+    }
+    if (digitCount >= 7) {
+        NSCharacterSet *phoneSet = [NSCharacterSet characterSetWithCharactersInString:@"0123456789+-(). "];
+        if ([[trim stringByTrimmingCharactersInSet:phoneSet] length] <= 2) return NO;
+    }
+    if (trim.length <= 6 && ([trim containsString:@":"] || [trim containsString:@"/"])) return NO;
+
     // Reject pure hex/UUID/base64-like tokens with no spaces and length >= 20
     if ([trim rangeOfString:@" "].location == NSNotFound && trim.length >= 20) {
         NSCharacterSet *alnum = [NSCharacterSet alphanumericCharacterSet];
         NSString *rem = [trim stringByTrimmingCharactersInSet:alnum];
         if (rem.length <= 2) return NO;
-    }
-
-    // Reject strings containing control characters or SQLite binary noise
-    for (NSUInteger i = 0; i < trim.length; i++) {
-        unichar c = [trim characterAtIndex:i];
-        if (c < 32 || c == 0xFFFD) return NO;
     }
     return YES;
 }
@@ -326,36 +340,16 @@ static void ZXScanDatabaseForHiddenIDs(NSString *dbPath, NSMutableDictionary<NSS
 {
     NSMutableDictionary<NSString *, NSMutableDictionary *> *found = [NSMutableDictionary new];
     @try {
-        // Load RAM-indexed decrypted profiles from Documents/zx_resolved_profiles.json (plus legacy ZaloXposed dir if any)
+        // Load verified profiles ONLY from Documents/zx_resolved_profiles.json
         NSMutableDictionary<NSString *, id> *ramProfiles = [NSMutableDictionary new];
-        NSString *legacyPath = [[ZXConfig dataDir] stringByAppendingPathComponent:@"zx_resolved_profiles.json"];
         NSString *primaryPath = [self resolvedProfilesPath];
-        for (NSString *p in @[legacyPath, primaryPath]) {
-            if (p.length == 0) continue;
-            NSData *d = [NSData dataWithContentsOfFile:p];
+        if (primaryPath.length > 0) {
+            NSData *d = [NSData dataWithContentsOfFile:primaryPath];
             if (d) {
                 id obj = [NSJSONSerialization JSONObjectWithData:d options:0 error:nil];
                 if ([obj isKindOfClass:[NSDictionary class]]) {
                     [ramProfiles addEntriesFromDictionary:(NSDictionary *)obj];
                 }
-            }
-        }
-
-        // Include any profile that was flagged as hidden directly in RAM (skipping internal metadata keys starting with '_')
-        for (NSString *uid in ramProfiles.allKeys) {
-            if ([uid hasPrefix:@"_"] || ZXIsGarbageString(uid)) continue;
-            NSDictionary *prof = ramProfiles[uid];
-            if (![prof isKindOfClass:[NSDictionary class]]) continue;
-            if ([prof[@"isHidden"] boolValue]) {
-                NSString *rName = [prof[@"name"] description] ?: @"";
-                NSString *rMsg = [prof[@"lastMessage"] description] ?: @"";
-                found[uid] = [NSMutableDictionary dictionaryWithDictionary:@{
-                    @"uid": uid,
-                    @"rawName": ZXIsValidHumanDisplayName(rName, uid) ? rName : @"",
-                    @"lastMessage": rMsg,
-                    @"sourceTable": @"RAM Cache (zx_resolved_profiles.json)",
-                    @"updatedAt": prof[@"timestamp"] ?: @((long long)[[NSDate date] timeIntervalSince1970])
-                }];
             }
         }
 
@@ -366,7 +360,25 @@ static void ZXScanDatabaseForHiddenIDs(NSString *dbPath, NSMutableDictionary<NSS
             ZXScanDatabaseForHiddenIDs(path, found);
         }
 
-        // 1. Priority lookup by exact ID in zx_resolved_profiles.json
+        // Also include explicitly verified hidden entries if not yet flushed to SQLite
+        for (NSString *uid in ramProfiles.allKeys) {
+            if ([uid hasPrefix:@"_"] || ZXIsGarbageString(uid)) continue;
+            NSDictionary *prof = ramProfiles[uid];
+            if (![prof isKindOfClass:[NSDictionary class]]) continue;
+            if ([prof[@"verified"] boolValue] && [prof[@"isHidden"] boolValue] && !found[uid]) {
+                NSString *rName = [prof[@"name"] description] ?: @"";
+                NSString *rMsg = [prof[@"lastMessage"] description] ?: @"";
+                found[uid] = [NSMutableDictionary dictionaryWithDictionary:@{
+                    @"uid": uid,
+                    @"rawName": ZXIsValidHumanDisplayName(rName, uid) ? rName : @"",
+                    @"lastMessage": rMsg,
+                    @"sourceTable": @"Verified PIN Cache",
+                    @"updatedAt": prof[@"timestamp"] ?: @((long long)[[NSDate date] timeIntervalSince1970])
+                }];
+            }
+        }
+
+        // 1. Strict lookup: ONLY accept entries from zx_resolved_profiles.json that have verified == YES!
         NSMutableSet<NSString *> *assignedNames = [NSMutableSet new];
         NSMutableArray<NSString *> *unresolvedUIDs = [NSMutableArray new];
         for (NSString *uid in found) {
@@ -379,7 +391,7 @@ static void ZXScanDatabaseForHiddenIDs(NSString *dbPath, NSMutableDictionary<NSS
                     prof = ramProfiles[cleanDigits];
                 }
             }
-            if (prof) {
+            if (prof && [prof[@"verified"] boolValue]) {
                 NSString *pName = [prof[@"name"] description] ?: @"";
                 NSString *pMsg = [prof[@"lastMessage"] description] ?: @"";
                 if (ZXIsValidHumanDisplayName(pName, uid)) {
@@ -395,56 +407,36 @@ static void ZXScanDatabaseForHiddenIDs(NSString *dbPath, NSMutableDictionary<NSS
             }
         }
 
-        // 2. If exactly 1 hidden ID in HiddenChatEntity is still unresolved AND user captured 1 unassigned result via PIN search (or tapped 1 result), auto-link it!
+        // 2. Auto-link ONLY when there is strictly 1 unresolved HiddenChatEntity ID AND 1 unambiguous verified PIN selection/single-row result
         if (unresolvedUIDs.count == 1) {
             NSString *loneUID = unresolvedUIDs.firstObject;
-            NSDictionary *matchedPinItem = nil;
-
-            NSDictionary *lastSelected = [ramProfiles[@"_last_pin_selected"] isKindOfClass:[NSDictionary class]] ? ramProfiles[@"_last_pin_selected"] : nil;
-            if (lastSelected) {
-                NSString *sName = [lastSelected[@"name"] description] ?: @"";
-                if (ZXIsValidHumanDisplayName(sName, loneUID) && ![assignedNames containsObject:sName]) {
-                    matchedPinItem = lastSelected;
-                }
-            }
-            if (!matchedPinItem && [ramProfiles[@"_pin_captured_items"] isKindOfClass:[NSDictionary class]]) {
-                NSDictionary *pinItems = ramProfiles[@"_pin_captured_items"];
-                NSMutableArray<NSDictionary *> *unassigned = [NSMutableArray new];
-                for (NSString *k in pinItems) {
-                    NSDictionary *it = pinItems[k];
-                    if (![it isKindOfClass:[NSDictionary class]]) continue;
-                    NSString *cName = [it[@"name"] description] ?: @"";
-                    if (ZXIsValidHumanDisplayName(cName, loneUID) && ![assignedNames containsObject:cName]) {
-                        [unassigned addObject:it];
+            NSDictionary *verifiedSingle = [ramProfiles[@"_verified_single_pin_result"] isKindOfClass:[NSDictionary class]]
+                ? ramProfiles[@"_verified_single_pin_result"]
+                : nil;
+            if (verifiedSingle && [verifiedSingle[@"verified"] boolValue]) {
+                NSString *linkedName = [verifiedSingle[@"name"] description] ?: @"";
+                NSString *linkedMsg = [verifiedSingle[@"lastMessage"] description] ?: @"";
+                if (ZXIsValidHumanDisplayName(linkedName, loneUID) && ![assignedNames containsObject:linkedName]) {
+                    NSMutableDictionary *entry = found[loneUID];
+                    entry[@"rawName"] = linkedName;
+                    if (linkedMsg.length > 0 && !ZXIsGarbageString(linkedMsg)) {
+                        entry[@"lastMessage"] = linkedMsg;
                     }
+                    ramProfiles[loneUID] = @{
+                        @"uid": loneUID,
+                        @"name": linkedName,
+                        @"lastMessage": linkedMsg,
+                        @"isHidden": @YES,
+                        @"verified": @YES,
+                        @"timestamp": @((long long)[[NSDate date] timeIntervalSince1970])
+                    };
+                    [ramProfiles removeObjectForKey:@"_verified_single_pin_result"];
+                    NSData *outData = [NSJSONSerialization dataWithJSONObject:ramProfiles options:0 error:nil];
+                    if (outData && primaryPath.length > 0) {
+                        [outData writeToFile:primaryPath atomically:YES];
+                    }
+                    ZXLog(@"Auto-linked verified PIN result '%@' -> lone HiddenChatEntity ID %@", linkedName, loneUID);
                 }
-                if (unassigned.count == 1) {
-                    matchedPinItem = unassigned.firstObject;
-                }
-            }
-
-            if (matchedPinItem) {
-                NSString *linkedName = [matchedPinItem[@"name"] description] ?: @"";
-                NSString *linkedMsg = [matchedPinItem[@"lastMessage"] description] ?: @"";
-                NSMutableDictionary *entry = found[loneUID];
-                entry[@"rawName"] = linkedName;
-                if (linkedMsg.length > 0 && !ZXIsGarbageString(linkedMsg)) {
-                    entry[@"lastMessage"] = linkedMsg;
-                }
-                // Persist this permanent ID -> Name link back into Documents/zx_resolved_profiles.json
-                ramProfiles[loneUID] = @{
-                    @"uid": loneUID,
-                    @"name": linkedName,
-                    @"lastMessage": linkedMsg,
-                    @"isHidden": @YES,
-                    @"timestamp": @((long long)[[NSDate date] timeIntervalSince1970])
-                };
-                [ramProfiles removeObjectForKey:@"_last_pin_selected"];
-                NSData *outData = [NSJSONSerialization dataWithJSONObject:ramProfiles options:0 error:nil];
-                if (outData && primaryPath.length > 0) {
-                    [outData writeToFile:primaryPath atomically:YES];
-                }
-                ZXLog(@"Auto-linked lone HiddenChatEntity ID %@ -> '%@'", loneUID, linkedName);
             }
         }
 
@@ -460,20 +452,21 @@ static void ZXScanDatabaseForHiddenIDs(NSString *dbPath, NSMutableDictionary<NSS
             if (lastMsg.length == 0) {
                 NSString *src = entry[@"sourceTable"] ?: @"HiddenChatEntity";
                 lastMsg = rawName.length > 0
-                    ? [NSString stringWithFormat:@"Đã giải mã tên thật • %@", src]
-                    : [NSString stringWithFormat:@"%@ • Bấm Mở thẳng khung chat để nhập PIN & tự lưu tên", src];
+                    ? [NSString stringWithFormat:@"Đã xác thực tên thật • %@", src]
+                    : [NSString stringWithFormat:@"%@ • Bấm Mở thẳng khung chat & nhập PIN để lưu đúng tên", src];
             }
             [finalList addObject:@{
                 @"uid": uid,
                 @"rawName": rawName,
                 @"name": displayTitle,
                 @"lastMessage": lastMsg,
+                @"verified": @(rawName.length > 0),
                 @"updatedAt": entry[@"updatedAt"] ?: @0
             }];
         }
 
-        ZXLog(@"HiddenChatEntity + RAM profile lookup inspected %lu DBs (%lu RAM entries), resolved %lu hidden chats",
-              (unsigned long)dbPaths.count, (unsigned long)ramProfiles.count, (unsigned long)finalList.count);
+        ZXLog(@"HiddenChatEntity strict verified scan inspected %lu DBs, resolved %lu hidden chats",
+              (unsigned long)dbPaths.count, (unsigned long)finalList.count);
         return finalList;
     } @catch (NSException *e) {
         ZXLog(@"scanSQLiteForHiddenChats exception: %@", e.reason);
