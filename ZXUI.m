@@ -29,6 +29,20 @@ static UIColor *ZXColorFromHex(NSUInteger hex, CGFloat alpha)
     return [UIColor colorWithRed:r green:g blue:b alpha:alpha];
 }
 
+static NSArray<UIWindow *> *ZXUIAllSceneWindows(void)
+{
+    NSMutableArray<UIWindow *> *wins = [NSMutableArray array];
+    if (@available(iOS 13.0, *)) {
+        for (UIScene *s in UIApplication.sharedApplication.connectedScenes) {
+            if (![s isKindOfClass:[UIWindowScene class]]) continue;
+            for (UIWindow *w in ((UIWindowScene *)s).windows) {
+                if (w && ![wins containsObject:w]) [wins addObject:w];
+            }
+        }
+    }
+    return wins;
+}
+
 static UIWindow *ZXKeyWindow(void)
 {
     if (@available(iOS 13.0, *)) {
@@ -39,8 +53,11 @@ static UIWindow *ZXKeyWindow(void)
                 if (w.isKeyWindow) return w;
         }
     }
-    UIWindow *w = UIApplication.sharedApplication.keyWindow;
-    return w ?: UIApplication.sharedApplication.windows.firstObject;
+    NSArray<UIWindow *> *all = ZXUIAllSceneWindows();
+    for (UIWindow *w in all) {
+        if (w.isKeyWindow && !w.hidden) return w;
+    }
+    return all.firstObject;
 }
 
 static UIViewController *ZXTopVC(void)
@@ -334,7 +351,7 @@ static void ZXRefreshFloatingBubbleNow(void)
     }
     CGFloat sz = (CGFloat)[ZXConfig bubbleSize];
     UIImage *logo = ZXCurrentFloatingLogo(CGSizeMake(sz, sz));
-    for (UIWindow *w in UIApplication.sharedApplication.windows) {
+    for (UIWindow *w in ZXUIAllSceneWindows()) {
         if (w.windowLevel < UIWindowLevelAlert + 50 || w.windowLevel >= UIWindowLevelStatusBar + 90) continue;
         UIView *root = w.rootViewController.view;
         if (!root || root.subviews.count == 0) continue;
@@ -451,10 +468,24 @@ static void ZXHookBubbleShow(void)
     self.tableView.separatorColor = ZXColorCardBorder();
     self.navigationItem.rightBarButtonItem = ZXMakeNavButton(@"arrow.clockwise.circle.fill", @"Quét lại", ZXColorZaloRed(), self, @selector(rescanAndReload));
 
-    UIView *headerWrap = [[UIView alloc] initWithFrame:CGRectMake(0, 0, UIScreen.mainScreen.bounds.size.width, 56)];
+    UIView *headerWrap = [[UIView alloc] initWithFrame:CGRectMake(0, 0, UIScreen.mainScreen.bounds.size.width, 104)];
     headerWrap.backgroundColor = UIColor.clearColor;
+
+    UIButton *dumpBtn = [UIButton buttonWithType:UIButtonTypeCustom];
+    dumpBtn.frame = CGRectMake(16, 10, headerWrap.bounds.size.width - 32, 40);
+    dumpBtn.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+    dumpBtn.backgroundColor = [UIColor colorWithRed:0.055 green:0.647 blue:0.914 alpha:0.16];
+    dumpBtn.layer.cornerRadius = 10;
+    dumpBtn.layer.borderWidth = 1.0;
+    dumpBtn.layer.borderColor = [UIColor colorWithRed:0.055 green:0.647 blue:0.914 alpha:1.0].CGColor;
+    [dumpBtn setTitle:@"🔬 Dump Introspection Zalo 26 (Share Sheet)" forState:UIControlStateNormal];
+    [dumpBtn setTitleColor:[UIColor colorWithRed:0.220 green:0.741 blue:0.973 alpha:1.0] forState:UIControlStateNormal];
+    dumpBtn.titleLabel.font = [UIFont systemFontOfSize:13.5 weight:UIFontWeightBold];
+    [dumpBtn addTarget:self action:@selector(onDumpIntrospectionTapped:) forControlEvents:UIControlEventTouchUpInside];
+    [headerWrap addSubview:dumpBtn];
+
     UIButton *clearCacheBtn = [UIButton buttonWithType:UIButtonTypeCustom];
-    clearCacheBtn.frame = CGRectMake(16, 10, headerWrap.bounds.size.width - 32, 40);
+    clearCacheBtn.frame = CGRectMake(16, 56, headerWrap.bounds.size.width - 32, 40);
     clearCacheBtn.autoresizingMask = UIViewAutoresizingFlexibleWidth;
     clearCacheBtn.backgroundColor = [UIColor colorWithRed:0.898 green:0.224 blue:0.208 alpha:0.16];
     clearCacheBtn.layer.cornerRadius = 10;
@@ -470,6 +501,25 @@ static void ZXHookBubbleShow(void)
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onHiddenChatsUpdated) name:@"ZXHiddenChatsUpdatedNotification" object:nil];
     self.chats = [ZXHookEngine discoveredHiddenChats] ?: @[];
     [ZXHookEngine scanMemoryForHiddenChats];
+}
+- (void)onDumpIntrospectionTapped:(UIButton *)sender
+{
+    ZXShowToast(self.navigationController.view ?: self.view, @"Đang trích xuất Class, SQLite & Cell Model...");
+    NSString *pinSnap = [ZXHookEngine lastPinSearchIntrospectSnapshot];
+    NSString *liveSceneSnap = [ZXScanner dumpLiveSceneListModelsOnMainThread];
+    __weak typeof(self) weakSelf = self;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSString *outPath = [ZXScanner runHiddenIntrospectionWithPinSnapshot:pinSnap liveSceneDump:liveSceneSnap];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            __strong typeof(weakSelf) strongSelf = weakSelf;
+            if (!strongSelf || outPath.length == 0) return;
+            NSURL *fileURL = [NSURL fileURLWithPath:outPath];
+            UIActivityViewController *av = [[UIActivityViewController alloc] initWithActivityItems:@[fileURL] applicationActivities:nil];
+            if (@available(iOS 13.0, *)) av.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
+            av.popoverPresentationController.sourceView = sender ?: strongSelf.view;
+            [strongSelf presentViewController:av animated:YES completion:nil];
+        });
+    });
 }
 - (void)onClearWrongNamesTapped
 {
@@ -550,18 +600,12 @@ static void ZXHookBubbleShow(void)
     NSDictionary *c = self.chats[indexPath.row];
     NSString *uid = [c[@"uid"] description] ?: @"?";
     NSString *rawName = [c[@"rawName"] description] ?: @"";
-    NSString *src = [c[@"hiddenSource"] description] ?: @"HiddenChatEntity";
-    NSString *srcBadge = [src isEqualToString:@"HideAction"] ? @"Vừa ẩn"
-                       : ([src isEqualToString:@"PinSearch"] ? @"Mã PIN ẩn"
-                       : ([src isEqualToString:@"SavedHiddenStore"] ? @"Đã lưu" : @"HiddenChatEntity"));
+    BOOL modelVerified = [c[@"modelVerified"] boolValue];
+    NSString *srcBadge = modelVerified ? @"Khớp 1-1 Model" : @"HiddenChatEntity";
     BOOL hasRealName = [ZXScanner isValidHumanDisplayName:rawName excludeUID:uid];
-    BOOL isSyntheticUID = ([uid hasPrefix:@"pin:"] || [uid hasPrefix:@"hide:"]);
-    NSString *titleText = nil;
-    if (hasRealName) {
-        titleText = isSyntheticUID ? rawName : [NSString stringWithFormat:@"%@ (ID: %@)", rawName, uid];
-    } else {
-        titleText = [NSString stringWithFormat:@"Hội thoại ẩn (ID: %@)", uid];
-    }
+    NSString *titleText = hasRealName
+        ? [NSString stringWithFormat:@"%@ (ID: %@)", rawName, uid]
+        : [NSString stringWithFormat:@"Chưa giải mã tên (ID: %@)", uid];
     cell.textLabel.text = titleText;
     cell.detailTextLabel.text = [NSString stringWithFormat:@"[%@] • %@", srcBadge, c[@"lastMessage"] ?: @"(Trống)"];
     cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
@@ -987,6 +1031,7 @@ static NSArray<NSDictionary *> *ZXFiveCategories(void)
                 @{ @"key": ZXK_UNLIMITED_MEDIA, @"title": @"Mở khóa giới hạn dung lượng gửi", @"sub": @"Cho phép đính kèm file và media dung lượng lớn", @"icon": @"externaldrive.fill.badge.plus", @"color": @(0xA855F7), @"kw": @"file size dung luong" },
                 @{ @"key": ZXK_TTL_OVERRIDE, @"title": @"Bật thời gian tự hủy tin nhắn (TTL)", @"sub": @"Áp dụng thời gian tự hủy tùy chỉnh cho tin bạn gửi", @"icon": @"hourglass", @"color": @(0xF43F5E), @"kw": @"ttl tu huy" },
                 @{ @"action": @"ttl", @"title": @"Đặt giá trị TTL (mili-giây)", @"sub": @"Nhập số ms tin nhắn tự hủy (ví dụ: 60000 = 1 phút)", @"icon": @"slider.horizontal.3", @"color": @(0xEC4899), @"kw": @"ttl ms gia tri" },
+                @{ @"action": @"dump_hidden_introspect", @"title": @"Dump Introspection Chat Ẩn (Share Sheet)", @"sub": @"Xuất zalo_26_introspect.txt gồm Schema SQLite, Snapshot Cell Model khi gõ PIN & Class Zalo 26", @"icon": @"doc.badge.gearshape.fill", @"color": @(0x06B6D4), @"kw": @"dump introspect hidden model sqlite zalo 26" },
                 @{ @"action": @"scan", @"title": @"Quét Class / Method Runtime", @"sub": @"Dò danh sách hàm nội bộ của Zalo để viết hook", @"icon": @"magnifyingglass.circle.fill", @"color": @(0x3B82F6), @"kw": @"scan quet class method" },
                 @{ @"action": @"viewscan", @"title": @"Xem & Chia sẻ kết quả quét", @"sub": @"Mở hoặc xuất tệp scan.txt", @"icon": @"square.and.arrow.up.fill", @"color": @(0x0EA5E9), @"kw": @"view scan chia se" },
                 @{ @"action": @"rules", @"title": @"Trình sửa rules.json", @"sub": @"Chỉnh sửa quy tắc hook trực tiếp trong ứng dụng", @"icon": @"curlybraces.square.fill", @"color": @(0x10B981), @"kw": @"rules json hook" },
@@ -1898,6 +1943,23 @@ static NSString *ZXFoldText(NSString *t)
             [weakSelf.tableView reloadData];
             ZXShowToast(weakSelf.navigationController.view ?: weakSelf.view, @"Đã lưu thời gian thu gọn thanh tab");
         }];
+    } else if ([action isEqualToString:@"dump_hidden_introspect"]) {
+        ZXShowToast(self.navigationController.view ?: self.view, @"Đang trích xuất zalo_26_introspect.txt...");
+        NSString *pinSnap = [ZXHookEngine lastPinSearchIntrospectSnapshot];
+        NSString *liveSceneSnap = [ZXScanner dumpLiveSceneListModelsOnMainThread];
+        UITableViewCell *anchorCell = [tableView cellForRowAtIndexPath:indexPath];
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+            NSString *outPath = [ZXScanner runHiddenIntrospectionWithPinSnapshot:pinSnap liveSceneDump:liveSceneSnap];
+            dispatch_async(dispatch_get_main_queue(), ^{
+                __strong typeof(weakSelf) strongSelf = weakSelf;
+                if (!strongSelf || outPath.length == 0) return;
+                NSURL *fileURL = [NSURL fileURLWithPath:outPath];
+                UIActivityViewController *av = [[UIActivityViewController alloc] initWithActivityItems:@[fileURL] applicationActivities:nil];
+                if (@available(iOS 13.0, *)) av.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
+                av.popoverPresentationController.sourceView = anchorCell ?: strongSelf.view;
+                [strongSelf presentViewController:av animated:YES completion:nil];
+            });
+        });
     } else if ([action isEqualToString:@"scan"]) {
         ZXShowToast(self.navigationController.view ?: self.view, @"Đang quét runtime Zalo...");
         dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
@@ -2053,7 +2115,7 @@ static UIView *ZXFindTabBar(UIView *root)
 
 static UIView *ZXFindTabBarInAnyWindow(void)
 {
-    for (UIWindow *w in UIApplication.sharedApplication.windows) {
+    for (UIWindow *w in ZXUIAllSceneWindows()) {
         UIView *found = ZXFindTabBar(w);
         if (found) return found;
     }
