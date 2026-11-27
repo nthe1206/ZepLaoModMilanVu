@@ -6,8 +6,7 @@
 #import <sqlite3.h>
 #import <string.h>
 
-/// Only rejects empty strings, file paths, SQLite internal names, and pure runtime class names (UIView, UITableViewCell, _TtC..., ZA...Cell).
-/// NEVER rejects valid numeric IDs or display titles like "Hội thoại ẩn (ID: ...)".
+/// Rejects empty strings, file paths, SQLite internal names, and pure runtime class names.
 static BOOL ZXIsSystemClassOrEmpty(NSString *s)
 {
     if (!s || s.length == 0) return YES;
@@ -25,7 +24,8 @@ static BOOL ZXIsSystemClassOrEmpty(NSString *s)
     }
     if ([trim rangeOfString:@" "].location == NSNotFound) {
         if ([trim hasPrefix:@"_TtC"] || [trim hasPrefix:@"_TtG"] || [trim hasPrefix:@"_UI"] || [trim hasPrefix:@"UI"] ||
-            [trim hasPrefix:@"NS"] || [trim hasPrefix:@"ZX"] || [trim hasPrefix:@"WK"] || [trim hasPrefix:@"CA"]) {
+            [trim hasPrefix:@"NS"] || [trim hasPrefix:@"ZX"] || [trim hasPrefix:@"WK"] || [trim hasPrefix:@"CA"] ||
+            [trim hasPrefix:@"GlobalSearchLogic."] || [trim hasPrefix:@"ZAGlobalSearch."]) {
             return YES;
         }
         NSArray<NSString *> *clsSuffixes = @[
@@ -36,7 +36,7 @@ static BOOL ZXIsSystemClassOrEmpty(NSString *s)
         for (NSString *sfx in clsSuffixes) {
             if ([lc hasSuffix:sfx]) return YES;
         }
-        if (([trim hasPrefix:@"ZA"] || [trim hasPrefix:@"ZDS"] || [trim hasPrefix:@"UX"]) && trim.length > 4) {
+        if (([trim hasPrefix:@"ZA"] || [trim hasPrefix:@"ZDS"] || [trim hasPrefix:@"UX"] || [trim hasPrefix:@"GS"]) && trim.length > 4) {
             NSRange digitRange = [trim rangeOfCharacterFromSet:NSCharacterSet.decimalDigitCharacterSet];
             if (digitRange.location == NSNotFound) return YES;
         }
@@ -44,12 +44,12 @@ static BOOL ZXIsSystemClassOrEmpty(NSString *s)
     return NO;
 }
 
-/// Checks if a candidate string is a valid human/group display name (1-60 chars, has letters, not placeholder/phone/time/status/class).
+/// Checks if a candidate string is a valid human/group display name (1-80 chars, has letters, not system/status text).
 static BOOL ZXIsValidHumanDisplayName(NSString *s, NSString *excludeUID)
 {
     if (!s) return NO;
     NSString *trim = [s stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
-    if (trim.length < 1 || trim.length > 60) return NO;
+    if (trim.length < 1 || trim.length > 80) return NO;
     if (excludeUID.length && [trim isEqualToString:excludeUID]) return NO;
     if (ZXIsSystemClassOrEmpty(trim)) return NO;
 
@@ -57,56 +57,28 @@ static BOOL ZXIsValidHumanDisplayName(NSString *s, NSString *excludeUID)
     NSArray<NSString *> *badNamePhrases = @[
         @"ảnh đã hết hạn", @"video đã hết hạn", @"file đã hết hạn", @"tệp đã hết hạn",
         @"tin nhắn đã thu hồi", @"tin nhắn đã được thu hồi", @"đã thu hồi",
-        @"hiddenchatentity", @"search/global.sqlite", @"global.sqlite", @".sqlite",
-        @"nhập pin", @"nhập mã pin", @"đang hoạt động", @"vừa xong", @"chạm để", @"xem thêm",
+        @"hiddenchatentity", @"searchglobal.sqlite", @"search/global.sqlite", @"global.sqlite", @".sqlite",
+        @"nhập pin", @"nhập mã pin", @"đổi mã pin", @"cài đặt trò chuyện ẩn", @"thiết lập mã pin",
+        @"đang hoạt động", @"vừa xong", @"chạm để", @"xem thêm", @"thu gọn",
         @"hội thoại ẩn", @"trò chuyện ẩn", @"chưa giải mã", @"không tìm thấy",
         @"kết quả tìm kiếm", @"chưa có tin nhắn", @"tìm kiếm gần đây", @"liên hệ gần đây",
         @"từ khóa tìm kiếm", @"không có kết quả", @"vừa truy cập", @"đang nhập",
-        @"cuộc gọi thoại", @"cuộc gọi video", @"cuộc gọi nhỡ", @"official account",
-        @"đã xác thực tên", @"đã xóa tên cũ", @"đã xóa cache", @"đã lưu tên thật",
         @"thông tin này chưa được liên kết"
     ];
     for (NSString *bad in badNamePhrases) {
         if ([lc containsString:bad]) return NO;
     }
-    if ([lc hasPrefix:@"bạn: "] || [lc hasPrefix:@"hoạt động "] || [lc hasPrefix:@"["] ||
-        [lc hasPrefix:@"uid:"] || [lc hasPrefix:@"id:"] || [lc hasPrefix:@"tin nhắn ("] ||
-        [lc hasPrefix:@"liên hệ ("] || [lc hasPrefix:@"link ("] || [lc hasPrefix:@"file ("] ||
-        [lc isEqualToString:@"đã gửi"] || [lc isEqualToString:@"đã nhận"] || [lc isEqualToString:@"đã xem"]) {
+    if ([lc hasPrefix:@"uid:"] || [lc hasPrefix:@"id:"] || [lc hasPrefix:@"tin nhắn ("] ||
+        [lc hasPrefix:@"liên hệ ("] || [lc hasPrefix:@"link ("] || [lc hasPrefix:@"file ("]) {
         return NO;
     }
-    NSArray<NSString *> *uiTitles = @[
-        @"tùy chọn", @"cài đặt", @"ẩn trò chuyện", @"ẩn hội thoại", @"tin nhắn",
-        @"danh bạ", @"khám phá", @"nhật ký", @"cá nhân", @"tìm kiếm",
-        @"thông tin", @"liên hệ", @"trò chuyện ẩn", @"mã pin", @"tất cả",
-        @"chưa đọc", @"phân loại", @"nhóm", @"bạn bè", @"gợi ý", @"oa",
-        @"link", @"file", @"tệp", @"ảnh", @"video",
-        @"options", @"settings", @"messages", @"contacts", @"search"
-    ];
-    for (NSString *t in uiTitles) {
-        if ([lc isEqualToString:t]) return NO;
-    }
 
-    // Must contain at least one Unicode letter (Latin / Vietnamese, e.g. "MẸ", "Hồ Kiến Quốc")
     NSRange letterRange = [trim rangeOfCharacterFromSet:[NSCharacterSet letterCharacterSet]];
     if (letterRange.location == NSNotFound) return NO;
 
-    NSUInteger digitCount = 0;
     for (NSUInteger i = 0; i < trim.length; i++) {
         unichar c = [trim characterAtIndex:i];
-        if (c >= '0' && c <= '9') digitCount++;
         if (c < 32 || c == 0xFFFD) return NO;
-    }
-    if (digitCount >= 7) {
-        NSCharacterSet *phoneSet = [NSCharacterSet characterSetWithCharactersInString:@"0123456789+-(). "];
-        if ([[trim stringByTrimmingCharactersInSet:phoneSet] length] <= 2) return NO;
-    }
-    if (trim.length <= 6 && ([trim containsString:@":"] || [trim containsString:@"/"])) return NO;
-
-    if ([trim rangeOfString:@" "].location == NSNotFound && trim.length >= 22) {
-        NSCharacterSet *alnum = [NSCharacterSet alphanumericCharacterSet];
-        NSString *rem = [trim stringByTrimmingCharactersInSet:alnum];
-        if (rem.length <= 2) return NO;
     }
     return YES;
 }
@@ -118,85 +90,17 @@ static NSString *ZXExtractDigitCore(NSString *raw)
              [[NSCharacterSet decimalDigitCharacterSet] invertedSet]] componentsJoinedByString:@""];
 }
 
-static BOOL ZXLooksLikeEpochTimestampNumber(long long num)
+static BOOL ZXMatchesAnyOwnerUID(NSString *candidateID, NSSet<NSString *> *ownerUIDs)
 {
-    // 10-digit seconds (2017..2039) or 13-digit milliseconds / 16-digit microseconds
-    if (num >= 1500000000LL && num <= 2200000000LL) return YES;
-    if (num >= 1500000000000LL && num <= 2200000000000LL) return YES;
-    if (num >= 1500000000000000LL && num <= 2200000000000000LL) return YES;
-    return NO;
-}
-
-/// Strictly rejects timestamp, PIN, flag, status, and sender/message metadata columns in SQLite.
-static BOOL ZXIsTimestampOrMetaColumn(NSString *colName)
-{
-    if (!colName || colName.length == 0) return YES;
-    NSString *lc = colName.lowercaseString;
-    NSArray<NSString *> *badTokens = @[
-        @"time", @"date", @"stamp", @"created", @"updated", @"modified",
-        @"expire", @"ttl", @"pin", @"status", @"state", @"flag", @"type",
-        @"version", @"ver", @"seq", @"order", @"sort", @"count", @"unread",
-        @"deleted", @"sync", @"sender", @"owner", @"author", @"creator",
-        @"from", @"msgid", @"messageid", @"clientid", @"globalmsg"
-    ];
-    for (NSString *tok in badTokens) {
-        if ([lc containsString:tok]) return YES;
+    if (!candidateID || candidateID.length == 0) return YES;
+    if ([ownerUIDs containsObject:candidateID]) return YES;
+    NSString *digits = ZXExtractDigitCore(candidateID);
+    if (digits.length > 0 && [ownerUIDs containsObject:digits]) return YES;
+    NSString *cfgOwner = [ZXConfig currentUserID];
+    if (cfgOwner.length > 0 && ([candidateID isEqualToString:cfgOwner] || (digits.length > 0 && [digits isEqualToString:cfgOwner]))) {
+        return YES;
     }
     return NO;
-}
-
-static BOOL ZXIsSpecificChatIDColumn(NSString *colName)
-{
-    if (!colName || ZXIsTimestampOrMetaColumn(colName)) return NO;
-    NSString *lc = colName.lowercaseString;
-    return ([lc isEqualToString:@"uid"] ||
-            [lc isEqualToString:@"userid"] ||
-            [lc isEqualToString:@"user_id"] ||
-            [lc isEqualToString:@"threadid"] ||
-            [lc isEqualToString:@"thread_id"] ||
-            [lc isEqualToString:@"conversationid"] ||
-            [lc isEqualToString:@"conversation_id"] ||
-            [lc isEqualToString:@"groupid"] ||
-            [lc isEqualToString:@"group_id"] ||
-            [lc isEqualToString:@"contactid"] ||
-            [lc isEqualToString:@"contact_id"] ||
-            [lc isEqualToString:@"friendid"] ||
-            [lc isEqualToString:@"friend_id"] ||
-            [lc isEqualToString:@"entityid"] ||
-            [lc isEqualToString:@"entity_id"] ||
-            [lc isEqualToString:@"targetid"] ||
-            [lc isEqualToString:@"target_id"] ||
-            [lc isEqualToString:@"peerid"] ||
-            [lc isEqualToString:@"peer_id"] ||
-            [lc isEqualToString:@"zaloid"] ||
-            [lc isEqualToString:@"zalo_id"] ||
-            [lc isEqualToString:@"chatid"] ||
-            [lc isEqualToString:@"chat_id"] ||
-            [lc isEqualToString:@"zthreadid"] ||
-            [lc isEqualToString:@"zuserid"]);
-}
-
-static BOOL ZXIsPreferredHiddenIDColumn(NSString *colName)
-{
-    if (!colName || ZXIsTimestampOrMetaColumn(colName)) return NO;
-    NSString *lc = colName.lowercaseString;
-    return ([lc containsString:@"uid"] ||
-            [lc containsString:@"id"] ||
-            [lc containsString:@"thread"] ||
-            [lc containsString:@"target"] ||
-            [lc containsString:@"user"] ||
-            [lc containsString:@"group"] ||
-            [lc containsString:@"chat"] ||
-            [lc containsString:@"conv"] ||
-            [lc containsString:@"peer"] ||
-            [lc containsString:@"contact"] ||
-            [lc containsString:@"entity"]);
-}
-
-static BOOL ZXIsExactEntityIDColumn(NSString *colName)
-{
-    return ZXIsSpecificChatIDColumn(colName) ||
-           (!ZXIsTimestampOrMetaColumn(colName) && [colName.lowercaseString isEqualToString:@"id"]);
 }
 
 static BOOL ZXIsSQLiteFileAtPath(NSString *path)
@@ -225,7 +129,7 @@ static BOOL ZXIsSQLiteFileAtPath(NSString *path)
 
 static void ZXCollectSQLiteFilesInDir(NSString *dir, NSMutableArray<NSString *> *outPaths, NSMutableSet<NSString *> *seen, int depth)
 {
-    if (!dir || depth > 8 || outPaths.count >= 600) return;
+    if (!dir || depth > 6 || outPaths.count >= 400) return;
     @try {
         NSFileManager *fm = [NSFileManager defaultManager];
         NSArray<NSString *> *items = [fm contentsOfDirectoryAtPath:dir error:nil];
@@ -239,7 +143,8 @@ static void ZXCollectSQLiteFilesInDir(NSString *dir, NSMutableArray<NSString *> 
             } else if (![seen containsObject:full] && ZXIsSQLiteFileAtPath(full)) {
                 [seen addObject:full];
                 NSString *lc = full.lowercaseString;
-                if ([lc hasSuffix:@"global.sqlite"] || [lc containsString:@"/search/"] || [lc containsString:@"hidden"]) {
+                // Prioritize Documents/searchglobal.sqlite & global.sqlite at index 0
+                if ([lc hasSuffix:@"searchglobal.sqlite"] || [lc hasSuffix:@"global.sqlite"]) {
                     [outPaths insertObject:full atIndex:0];
                 } else {
                     [outPaths addObject:full];
@@ -253,34 +158,41 @@ static NSArray<NSString *> *ZXAllZaloSQLitePaths(void)
 {
     NSMutableArray<NSString *> *dbPaths = [NSMutableArray new];
     NSMutableSet<NSString *> *seen = [NSMutableSet new];
+    NSFileManager *fm = [NSFileManager defaultManager];
+
+    // Explicit fast check for Documents/searchglobal.sqlite first
+    NSString *docs = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
+    if (docs.length > 0) {
+        for (NSString *directRel in @[@"searchglobal.sqlite", @"search/global.sqlite", @"global.sqlite"]) {
+            NSString *p = [docs stringByAppendingPathComponent:directRel];
+            if ([fm fileExistsAtPath:p] && ![seen containsObject:p]) {
+                [seen addObject:p];
+                [dbPaths addObject:p];
+            }
+        }
+    }
 
     NSMutableArray<NSString *> *roots = [NSMutableArray new];
     NSString *home = NSHomeDirectory();
     if (home.length) {
         [roots addObject:[home stringByAppendingPathComponent:@"Documents"]];
         [roots addObject:[home stringByAppendingPathComponent:@"Library"]];
-        [roots addObject:[home stringByAppendingPathComponent:@"tmp"]];
-        [roots addObject:home];
     }
     for (NSNumber *dirType in @[@(NSDocumentDirectory), @(NSLibraryDirectory), @(NSCachesDirectory), @(NSApplicationSupportDirectory)]) {
         NSString *p = NSSearchPathForDirectoriesInDomains((NSSearchPathDirectory)dirType.unsignedIntegerValue, NSUserDomainMask, YES).firstObject;
         if (p.length && ![roots containsObject:p]) [roots addObject:p];
     }
-    // Support both stock and custom re-signed Bundle IDs (e.g. vn.com.vng.zingalo2 via ESign)
     NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier] ?: @"";
     NSMutableArray<NSString *> *groupIds = [NSMutableArray arrayWithArray:@[
         @"group.vn.com.vng.zingalo",
-        @"group.com.vng.zalo",
-        @"group.vn.com.vng.zingalo.share",
-        @"group.vn.com.vng.zingalo.notification",
-        @"group.com.vng.zingalo"
+        @"group.com.vng.zalo"
     ]];
     if (bundleID.length > 0) {
         NSString *customGroup = [@"group." stringByAppendingString:bundleID];
         if (![groupIds containsObject:customGroup]) [groupIds addObject:customGroup];
     }
     for (NSString *gid in groupIds) {
-        NSURL *gURL = [[NSFileManager defaultManager] containerURLForSecurityApplicationGroupIdentifier:gid];
+        NSURL *gURL = [fm containerURLForSecurityApplicationGroupIdentifier:gid];
         if (gURL.path.length && ![roots containsObject:gURL.path]) {
             [roots addObject:gURL.path];
         }
@@ -299,199 +211,231 @@ static NSString *ZXColumnText(sqlite3_stmt *stmt, int col)
     return [NSString stringWithUTF8String:(const char *)txt] ?: @"";
 }
 
-static NSString *ZXColumnScalarString(sqlite3_stmt *stmt, int col)
+/// Copies <db>.sqlite, <db>.sqlite-wal, and <db>.sqlite-shm simultaneously to an isolated directory in NSTemporaryDirectory()
+/// so uncommitted WAL frames are safely read with SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX without locking Zalo's live DB.
+static NSString *ZXCopySQLiteSnapshotToTemp(NSString *srcDbPath, NSString **outTempDir)
 {
-    if (!stmt || col < 0 || col >= sqlite3_column_count(stmt)) return @"";
-    int cType = sqlite3_column_type(stmt, col);
-    if (cType == SQLITE_NULL) return @"";
-    if (cType == SQLITE_INTEGER) {
-        return [NSString stringWithFormat:@"%lld", sqlite3_column_int64(stmt, col)];
+    if (!srcDbPath || srcDbPath.length == 0) return nil;
+    NSFileManager *fm = [NSFileManager defaultManager];
+    if (![fm fileExistsAtPath:srcDbPath]) return nil;
+
+    NSString *tempDir = [NSTemporaryDirectory() stringByAppendingPathComponent:
+                         [NSString stringWithFormat:@"zx_hchat_%@", [[NSUUID UUID] UUIDString]]];
+    NSError *err = nil;
+    if (![fm createDirectoryAtPath:tempDir withIntermediateDirectories:YES attributes:nil error:&err]) {
+        return nil;
     }
-    const unsigned char *txt = sqlite3_column_text(stmt, col);
-    if (txt) {
-        NSString *s = [NSString stringWithUTF8String:(const char *)txt];
-        if (s.length > 0) return s;
+    NSString *fileName = srcDbPath.lastPathComponent;
+    NSString *dstDbPath = [tempDir stringByAppendingPathComponent:fileName];
+    if (![fm copyItemAtPath:srcDbPath toPath:dstDbPath error:&err]) {
+        [fm removeItemAtPath:tempDir error:nil];
+        return nil;
     }
-    if (cType == SQLITE_BLOB) {
-        const void *blob = sqlite3_column_blob(stmt, col);
-        int len = sqlite3_column_bytes(stmt, col);
-        if (blob && len > 0 && len <= 128) {
-            NSString *bs = [[NSString alloc] initWithBytes:blob length:(NSUInteger)len encoding:NSUTF8StringEncoding];
-            if (bs.length > 0) return bs;
+
+    for (NSString *suffix in @[@"-wal", @"-shm"]) {
+        NSString *srcSidecar = [srcDbPath stringByAppendingString:suffix];
+        if ([fm fileExistsAtPath:srcSidecar]) {
+            NSString *dstSidecar = [dstDbPath stringByAppendingString:suffix];
+            [fm copyItemAtPath:srcSidecar toPath:dstSidecar error:nil];
         }
     }
-    return @"";
+
+    if (outTempDir) *outTempDir = tempDir;
+    return dstDbPath;
 }
 
-static BOOL ZXIsPlausibleHiddenIDValue(NSString *rawVal, int totalCols, BOOL isSpecificCol)
+/// Queries HiddenChatEntity (CREATE TABLE HiddenChatEntity (userid TEXT NOT NULL, threadid TEXT NOT NULL, timestamp DATETIME, threadtype INTEGER, ...)):
+/// - Stores `userid` into ioOwnerUIDs (account owner ID, e.g. "320193294") so it is STRICTLY EXCLUDED.
+/// - Queries ONLY `threadid` and `threadtype`: SELECT DISTINCT threadid, threadtype FROM HiddenChatEntity WHERE threadid IS NOT NULL AND length(threadid) > 0;
+static void ZXScanHiddenChatEntityInDatabase(NSString *srcDbPath,
+                                             NSMutableDictionary<NSString *, NSMutableDictionary *> *outThreads,
+                                             NSMutableSet<NSString *> *ioOwnerUIDs,
+                                             BOOL *outFoundHiddenTable)
 {
-    if (!rawVal || rawVal.length == 0) return NO;
-    NSString *val = [rawVal stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
-    if (val.length == 0 || [val isEqualToString:@"0"] || [val isEqualToString:@"-1"] || ZXIsSystemClassOrEmpty(val)) {
-        return NO;
+    if (!srcDbPath || !outThreads || !ioOwnerUIDs) return;
+    // Fast filter: only copy & inspect searchglobal.sqlite / global.sqlite / hidden* DBs unless checking all
+    NSString *lcPath = srcDbPath.lowercaseString;
+    if (![lcPath containsString:@"global"] && ![lcPath containsString:@"search"] && ![lcPath containsString:@"hidden"]) {
+        return;
     }
-    NSString *digits = ZXExtractDigitCore(val);
-    if (digits.length < 4 || digits.length > 24) return NO;
 
-    NSString *nonDigits = [val stringByTrimmingCharactersInSet:NSCharacterSet.decimalDigitCharacterSet];
-    if (nonDigits.length == 0 && totalCols > 1 && !isSpecificCol) {
-        long long num = [val longLongValue];
-        if (ZXLooksLikeEpochTimestampNumber(num)) return NO;
-    }
-    return YES;
-}
-
-// Read Ground-Truth IDs S_hidden from HiddenChatEntity (checking sqlite3_column_name to prioritize uid/id/thread/target and exclude time/date/stamp).
-static void ZXScanDatabaseForHiddenIDs(NSString *dbPath, NSMutableDictionary<NSString *, NSMutableDictionary *> *results)
-{
-    if (!dbPath || !results) return;
+    NSString *tempDir = nil;
+    sqlite3 *db = NULL;
     @try {
-        sqlite3 *db = NULL;
-        int rc = sqlite3_open_v2(dbPath.UTF8String, &db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_NOMUTEX, NULL);
+        NSString *tempDbPath = ZXCopySQLiteSnapshotToTemp(srcDbPath, &tempDir);
+        if (!tempDbPath) return;
+
+        int rc = sqlite3_open_v2(tempDbPath.UTF8String, &db, SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX, NULL);
         if (rc != SQLITE_OK || !db) {
             if (db) { sqlite3_close(db); db = NULL; }
-            rc = sqlite3_open_v2(dbPath.UTF8String, &db, SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX, NULL);
-        }
-        if (rc != SQLITE_OK || !db) {
-            if (db) sqlite3_close(db);
             return;
         }
-        sqlite3_busy_timeout(db, 250);
+        sqlite3_busy_timeout(db, 200);
 
-        NSMutableArray<NSString *> *tables = [NSMutableArray new];
-        sqlite3_stmt *tStmt = NULL;
-        if (sqlite3_prepare_v2(db, "SELECT name FROM sqlite_master WHERE type='table'", -1, &tStmt, NULL) == SQLITE_OK) {
-            while (sqlite3_step(tStmt) == SQLITE_ROW) {
-                NSString *tName = ZXColumnText(tStmt, 0);
-                if (tName.length && ![tName hasPrefix:@"sqlite_"]) {
-                    NSString *tlc = tName.lowercaseString;
-                    if ([tlc containsString:@"hiddenchat"] || [tlc containsString:@"hidechat"] ||
-                        [tlc containsString:@"hidden_chat"] || [tlc containsString:@"hiddenconversation"]) {
-                        [tables addObject:tName];
-                    }
-                }
+        BOOL hasHiddenTable = NO;
+        sqlite3_stmt *chkStmt = NULL;
+        int prepRC = sqlite3_prepare_v2(db, "SELECT name FROM sqlite_master WHERE type='table' AND lower(name)='hiddenchatentity' LIMIT 1;", -1, &chkStmt, NULL);
+        if (prepRC != SQLITE_OK && tempDir.length > 0) {
+            // If -wal was present without -shm, SQLITE_OPEN_READONLY cannot rebuild the WAL index; reopen our isolated temp copy READWRITE
+            if (chkStmt) { sqlite3_finalize(chkStmt); chkStmt = NULL; }
+            sqlite3_close(db);
+            db = NULL;
+            if (sqlite3_open_v2(tempDbPath.UTF8String, &db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_NOMUTEX, NULL) == SQLITE_OK && db) {
+                prepRC = sqlite3_prepare_v2(db, "SELECT name FROM sqlite_master WHERE type='table' AND lower(name)='hiddenchatentity' LIMIT 1;", -1, &chkStmt, NULL);
             }
         }
-        if (tStmt) sqlite3_finalize(tStmt);
-
-        for (NSString *table in tables) {
-            NSString *query = [NSString stringWithFormat:@"SELECT * FROM \"%@\" LIMIT 500", table];
-            sqlite3_stmt *qStmt = NULL;
-            if (sqlite3_prepare_v2(db, query.UTF8String, -1, &qStmt, NULL) == SQLITE_OK) {
-                int colCount = sqlite3_column_count(qStmt);
-                NSUInteger tableRowHits = 0;
-
-                while (sqlite3_step(qStmt) == SQLITE_ROW) {
-                    BOOL skipDeleted = NO;
-                    for (int c = 0; c < colCount; c++) {
-                        const char *rcn = sqlite3_column_name(qStmt, c);
-                        NSString *cn = rcn ? [NSString stringWithUTF8String:rcn] : @"";
-                        NSString *lc = cn.lowercaseString;
-                        if ([lc isEqualToString:@"isdeleted"] || [lc isEqualToString:@"is_deleted"] || [lc isEqualToString:@"deleted"]) {
-                            NSString *v = [ZXColumnScalarString(qStmt, c) stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet].lowercaseString;
-                            if ([v isEqualToString:@"1"] || [v isEqualToString:@"true"]) {
-                                skipDeleted = YES;
-                                break;
-                            }
-                        }
-                    }
-                    if (skipDeleted) continue;
-
-                    NSString *uid = @"";
-                    // Pass 1: Specific chat/thread/user/target ID columns (uid, threadId, userId, targetId...)
-                    for (int c = 0; c < colCount; c++) {
-                        const char *rcn = sqlite3_column_name(qStmt, c);
-                        NSString *cn = rcn ? [NSString stringWithUTF8String:rcn] : @"";
-                        if (!ZXIsSpecificChatIDColumn(cn)) continue;
-                        NSString *val = [ZXColumnScalarString(qStmt, c) stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
-                        if (ZXIsPlausibleHiddenIDValue(val, colCount, YES)) {
-                            uid = val;
-                            break;
-                        }
-                    }
-                    // Pass 2: Columns containing uid / id / thread / target and NOT time / date / stamp
-                    if (uid.length == 0) {
-                        for (int c = 0; c < colCount; c++) {
-                            const char *rcn = sqlite3_column_name(qStmt, c);
-                            NSString *cn = rcn ? [NSString stringWithUTF8String:rcn] : @"";
-                            if (!ZXIsPreferredHiddenIDColumn(cn)) continue;
-                            NSString *val = [ZXColumnScalarString(qStmt, c) stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
-                            if (ZXIsPlausibleHiddenIDValue(val, colCount, NO)) {
-                                uid = val;
-                                break;
-                            }
-                        }
-                    }
-                    // Pass 3: Fallback ONLY on non-timestamp/non-meta columns
-                    if (uid.length == 0) {
-                        for (int c = 0; c < colCount; c++) {
-                            const char *rcn = sqlite3_column_name(qStmt, c);
-                            NSString *cn = rcn ? [NSString stringWithUTF8String:rcn] : @"";
-                            if (ZXIsTimestampOrMetaColumn(cn)) continue;
-                            NSString *val = [ZXColumnScalarString(qStmt, c) stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
-                            if (ZXIsPlausibleHiddenIDValue(val, colCount, NO)) {
-                                uid = val;
-                                break;
-                            }
-                        }
-                    }
-                    if (uid.length == 0) continue;
-
-                    tableRowHits++;
-                    if (!results[uid]) {
-                        results[uid] = [NSMutableDictionary dictionaryWithDictionary:@{
-                            @"uid": uid,
-                            @"digitCore": ZXExtractDigitCore(uid),
-                            @"rawName": @"",
-                            @"lastMessage": @"",
-                            @"hiddenSource": @"HiddenChatEntity",
-                            @"sourceTable": [NSString stringWithFormat:@"%@ • %@", dbPath.lastPathComponent, table],
-                            @"updatedAt": @((long long)[[NSDate date] timeIntervalSince1970])
-                        }];
-                    }
-                }
-                ZXLog(@"Scanned %@.%@ -> %lu hidden IDs", dbPath.lastPathComponent, table, (unsigned long)tableRowHits);
+        if (prepRC == SQLITE_OK && chkStmt) {
+            if (sqlite3_step(chkStmt) == SQLITE_ROW) {
+                hasHiddenTable = YES;
             }
-            if (qStmt) sqlite3_finalize(qStmt);
+        }
+        if (chkStmt) sqlite3_finalize(chkStmt);
+        if (!hasHiddenTable) return;
+
+        if (outFoundHiddenTable) *outFoundHiddenTable = YES;
+
+        // Step A: Read `userid` column (ownerUID, e.g. "320193294") and persist so it is NEVER added to hidden chats!
+        sqlite3_stmt *ownerStmt = NULL;
+        if (sqlite3_prepare_v2(db, "SELECT DISTINCT userid FROM HiddenChatEntity WHERE userid IS NOT NULL AND length(userid) > 0;", -1, &ownerStmt, NULL) == SQLITE_OK) {
+            while (sqlite3_step(ownerStmt) == SQLITE_ROW) {
+                NSString *ownerId = [ZXColumnText(ownerStmt, 0) stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+                if (ownerId.length > 0) {
+                    [ioOwnerUIDs addObject:ownerId];
+                    NSString *ownerDigits = ZXExtractDigitCore(ownerId);
+                    if (ownerDigits.length > 0) [ioOwnerUIDs addObject:ownerDigits];
+                }
+            }
+            sqlite3_finalize(ownerStmt);
+        }
+        if (ioOwnerUIDs.count > 0) {
+            [[NSUserDefaults standardUserDefaults] setObject:ioOwnerUIDs.allObjects forKey:@"zx_owner_uids_v5"];
         }
 
-        sqlite3_close(db);
+        // Step B: Strictly query ONLY `threadid` and `threadtype`
+        sqlite3_stmt *qStmt = NULL;
+        const char *sql = "SELECT DISTINCT threadid, threadtype FROM HiddenChatEntity WHERE threadid IS NOT NULL AND length(threadid) > 0;";
+        if (sqlite3_prepare_v2(db, sql, -1, &qStmt, NULL) == SQLITE_OK) {
+            NSUInteger rowHits = 0;
+            while (sqlite3_step(qStmt) == SQLITE_ROW) {
+                NSString *threadId = [ZXColumnText(qStmt, 0) stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+                int threadType = sqlite3_column_int(qStmt, 1);
+                if (threadId.length == 0 || [threadId isEqualToString:@"0"] || ZXIsSystemClassOrEmpty(threadId)) {
+                    continue;
+                }
+                // STRICT RULE: NEVER allow ownerUID ("320193294") into hidden chats!
+                if (ZXMatchesAnyOwnerUID(threadId, ioOwnerUIDs)) {
+                    continue;
+                }
+
+                rowHits++;
+                if (!outThreads[threadId]) {
+                    outThreads[threadId] = [NSMutableDictionary dictionaryWithDictionary:@{
+                        @"uid": threadId,
+                        @"threadId": threadId,
+                        @"threadType": @(threadType),
+                        @"digitCore": ZXExtractDigitCore(threadId),
+                        @"rawName": @"",
+                        @"subtitle": @"",
+                        @"sourceTable": [NSString stringWithFormat:@"%@ • HiddenChatEntity", srcDbPath.lastPathComponent],
+                        @"updatedAt": @((long long)[[NSDate date] timeIntervalSince1970])
+                    }];
+                }
+            }
+            ZXLog(@"HiddenChatEntity (%@): %lu hidden threadids (ownerUIDs=%@)",
+                  srcDbPath.lastPathComponent, (unsigned long)rowHits, [ioOwnerUIDs.allObjects componentsJoinedByString:@","]);
+            sqlite3_finalize(qStmt);
+        }
     } @catch (NSException *e) {
-        ZXLog(@"HiddenChatEntity scan exception on %@: %@", dbPath.lastPathComponent, e.reason);
+        ZXLog(@"ZXScanHiddenChatEntityInDatabase exception: %@", e.reason);
+    } @finally {
+        if (db) sqlite3_close(db);
+        if (tempDir.length > 0) {
+            [[NSFileManager defaultManager] removeItemAtPath:tempDir error:nil];
+        }
     }
 }
 
-static NSArray<NSString *> *ZXCandidateJSONPathsForName(NSString *fileName)
+static NSArray<NSString *> *ZXCandidateCacheFilePaths(NSString *fileName)
 {
     NSMutableArray<NSString *> *paths = [NSMutableArray new];
     if (!fileName.length) return paths;
     NSString *docs = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
     NSString *caches = NSSearchPathForDirectoriesInDomains(NSCachesDirectory, NSUserDomainMask, YES).firstObject;
-    NSString *home = NSHomeDirectory();
-
-    NSMutableArray<NSString *> *dirs = [NSMutableArray new];
-    if (docs.length) {
-        [dirs addObject:docs];
-        [dirs addObject:[docs stringByAppendingPathComponent:@"ZaloXposed"]];
-    }
-    if (caches.length) {
-        [dirs addObject:caches];
-        [dirs addObject:[caches stringByAppendingPathComponent:@"ZaloXposed"]];
-    }
-    if (home.length) {
-        NSString *hDocs = [home stringByAppendingPathComponent:@"Documents"];
-        NSString *hCaches = [[home stringByAppendingPathComponent:@"Library"] stringByAppendingPathComponent:@"Caches"];
-        if (![dirs containsObject:hDocs]) [dirs addObject:hDocs];
-        if (![dirs containsObject:hCaches]) [dirs addObject:hCaches];
-    }
     NSString *cfgDir = [ZXConfig dataDir];
-    if (cfgDir.length && ![dirs containsObject:cfgDir]) [dirs addObject:cfgDir];
-
-    for (NSString *d in dirs) {
-        NSString *full = [d stringByAppendingPathComponent:fileName];
+    for (NSString *dir in @[docs ?: @"", cfgDir ?: @"", caches ?: @"",
+                            (docs.length ? [docs stringByAppendingPathComponent:@"ZaloXposed"] : @""),
+                            (caches.length ? [caches stringByAppendingPathComponent:@"ZaloXposed"] : @"")]) {
+        if (dir.length == 0) continue;
+        NSString *full = [dir stringByAppendingPathComponent:fileName];
         if (![paths containsObject:full]) [paths addObject:full];
     }
     return paths;
+}
+
+/// Loads `Documents/zx_resolved_profiles.json`. If `schema_version` is missing or != `"v5_gs_hidden_model"`,
+/// automatically deletes ALL legacy cache files so corrupted old entries ("Ivory", "320193294", "Ảnh đã hết hạn") are wiped clean!
+static NSDictionary<NSString *, NSDictionary *> *ZXLoadVerifiedV5Profiles(NSSet<NSString *> *ownerUIDs)
+{
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *primaryPath = [ZXScanner resolvedProfilesPath];
+
+    // Purge any legacy hidden_chats.json files from older schemas
+    static dispatch_once_t onceCleanLegacy;
+    dispatch_once(&onceCleanLegacy, ^{
+        if (![[NSUserDefaults standardUserDefaults] boolForKey:@"zx_migrated_v5_gs_hidden_model"]) {
+            for (NSString *oldHC in ZXCandidateCacheFilePaths(@"hidden_chats.json")) {
+                if ([fm fileExistsAtPath:oldHC]) [fm removeItemAtPath:oldHC error:nil];
+            }
+            [[NSUserDefaults standardUserDefaults] removeObjectForKey:@"zx_dismissed_hidden_keys"];
+            [[NSUserDefaults standardUserDefaults] setBool:YES forKey:@"zx_migrated_v5_gs_hidden_model"];
+        }
+    });
+
+    for (NSString *candPath in ZXCandidateCacheFilePaths(@"zx_resolved_profiles.json")) {
+        if (![fm fileExistsAtPath:candPath]) continue;
+        NSData *d = [NSData dataWithContentsOfFile:candPath];
+        if (!d) {
+            [fm removeItemAtPath:candPath error:nil];
+            continue;
+        }
+        id json = [NSJSONSerialization JSONObjectWithData:d options:0 error:nil];
+        NSDictionary *root = [json isKindOfClass:[NSDictionary class]] ? (NSDictionary *)json : nil;
+        NSString *ver = [root[@"schema_version"] isKindOfClass:[NSString class]] ? root[@"schema_version"] : @"";
+        if (![ver isEqualToString:ZX_HIDDEN_CACHE_SCHEMA_VERSION]) {
+            ZXLog(@"Purging outdated cache at %@ (schema_version='%@' != '%@')", candPath.lastPathComponent, ver, ZX_HIDDEN_CACHE_SCHEMA_VERSION);
+            [fm removeItemAtPath:candPath error:nil];
+            continue;
+        }
+        if (![candPath isEqualToString:primaryPath]) continue;
+
+        NSDictionary *rawProfiles = [root[@"profiles"] isKindOfClass:[NSDictionary class]] ? root[@"profiles"] : @{};
+        NSMutableDictionary<NSString *, NSDictionary *> *valid = [NSMutableDictionary new];
+        BOOL dirty = NO;
+
+        for (NSString *k in rawProfiles) {
+            NSDictionary *item = [rawProfiles[k] isKindOfClass:[NSDictionary class]] ? rawProfiles[k] : nil;
+            if (!item) { dirty = YES; continue; }
+            NSString *tid = [[item[@"threadId"] ?: item[@"uid"] ?: k description] stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+            NSString *dName = [[item[@"displayName"] ?: item[@"name"] ?: @"" description] stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+            if (tid.length == 0 || ZXMatchesAnyOwnerUID(tid, ownerUIDs) || !ZXIsValidHumanDisplayName(dName, tid)) {
+                dirty = YES;
+                continue;
+            }
+            valid[tid] = item;
+        }
+
+        if (dirty) {
+            NSDictionary *rewritten = @{
+                @"schema_version": ZX_HIDDEN_CACHE_SCHEMA_VERSION,
+                @"updated_at": @((long long)[[NSDate date] timeIntervalSince1970]),
+                @"profiles": valid
+            };
+            NSData *outData = [NSJSONSerialization dataWithJSONObject:rewritten options:0 error:nil];
+            if (outData) [outData writeToFile:primaryPath atomically:YES];
+        }
+        return valid;
+    }
+    return @{};
 }
 
 // ============================================================================
@@ -506,8 +450,6 @@ static BOOL ZXIsZaloBinaryClass(Class cls)
     return (strstr(img, ".app/") != NULL);
 }
 
-/// Tagged-Pointer-safe & alignment-safe Objective-C ivar reader on arm64/arm64e.
-/// Preserves bit-63 Tagged Pointers (e.g. short strings like "MẸ" or NSNumber) without ARC crashes.
 static id ZXScannerSafeReadObjectIvar(id obj, Ivar iv)
 {
     if (!obj || !iv) return nil;
@@ -524,40 +466,6 @@ static id ZXScannerSafeReadObjectIvar(id obj, Ivar iv)
         if ((rawPtr & 0x7ULL) != 0 || rawPtr < 0x10000ULL) return nil;
     }
     return object_getIvar(obj, iv);
-}
-
-static BOOL ZXScannerSafeReadIntegerIvar(id obj, Ivar iv, long long *outVal)
-{
-    if (!obj || !iv || !outVal) return NO;
-    const char *enc = ivar_getTypeEncoding(iv);
-    if (!enc) return NO;
-    ptrdiff_t offset = ivar_getOffset(iv);
-    const uint8_t *ptr = (const uint8_t *)(__bridge const void *)obj + offset;
-    if (enc[0] == 'q' || enc[0] == 'l') {
-        int64_t v = 0;
-        memcpy(&v, ptr, sizeof(v));
-        *outVal = (long long)v;
-        return YES;
-    }
-    if (enc[0] == 'Q' || enc[0] == 'L') {
-        uint64_t v = 0;
-        memcpy(&v, ptr, sizeof(v));
-        *outVal = (long long)v;
-        return YES;
-    }
-    if (enc[0] == 'i') {
-        int32_t v = 0;
-        memcpy(&v, ptr, sizeof(v));
-        *outVal = (long long)v;
-        return YES;
-    }
-    if (enc[0] == 'I') {
-        uint32_t v = 0;
-        memcpy(&v, ptr, sizeof(v));
-        *outVal = (long long)v;
-        return YES;
-    }
-    return NO;
 }
 
 static NSArray<UIWindow *> *ZXScannerAllSceneWindows(void)
@@ -577,7 +485,7 @@ static NSArray<UIWindow *> *ZXScannerAllSceneWindows(void)
 
 static void ZXDumpObjectIvarsRecursive(id obj, int depth, int maxDepth, NSMutableString *outLog, NSMutableSet<NSValue *> *visited)
 {
-    if (!obj || depth > maxDepth || outLog.length > 180000) return;
+    if (!obj || depth > maxDepth || outLog.length > 160000) return;
     NSValue *ptrKey = [NSValue valueWithPointer:(__bridge const void *)obj];
     if ([visited containsObject:ptrKey]) return;
     [visited addObject:ptrKey];
@@ -592,177 +500,28 @@ static void ZXDumpObjectIvarsRecursive(id obj, int depth, int maxDepth, NSMutabl
             for (unsigned int i = 0; i < ivCount; i++) {
                 const char *nameC = ivar_getName(ivars[i]);
                 const char *encC  = ivar_getTypeEncoding(ivars[i]);
-                if (!nameC || !encC) continue;
-                NSString *ivName = [NSString stringWithUTF8String:nameC];
-                NSString *ivEnc  = [NSString stringWithUTF8String:encC];
-
-                if (encC[0] == '@' && encC[1] != '?') {
-                    @try {
-                        id val = ZXScannerSafeReadObjectIvar(obj, ivars[i]);
-                        if (!val) continue;
-                        if ([val isKindOfClass:[UIView class]] || [val isKindOfClass:[CALayer class]] ||
-                            [val isKindOfClass:[UIViewController class]] || [val isKindOfClass:[UIImage class]] ||
-                            [val isKindOfClass:[UIColor class]] || [val isKindOfClass:[UIFont class]] ||
-                            [val isKindOfClass:[NSLayoutConstraint class]] || [val isKindOfClass:[UIGestureRecognizer class]]) {
-                            continue;
-                        }
-                        if ([val isKindOfClass:[NSString class]] || [val isKindOfClass:[NSNumber class]]) {
-                            NSString *sVal = [[val description] stringByReplacingOccurrencesOfString:@"\n" withString:@" "];
-                            if (sVal.length > 160) sVal = [[sVal substringToIndex:160] stringByAppendingString:@"..."];
-                            [outLog appendFormat:@"%@• [%s] %@ (%@) = \"%@\"\n",
-                                indent, class_getName(curCls), ivName, ivEnc, sVal];
-                        } else if ([val isKindOfClass:[NSDictionary class]]) {
-                            NSDictionary *dict = (NSDictionary *)val;
-                            [outLog appendFormat:@"%@• [%s] %@ (NSDictionary keys=%@)\n",
-                                indent, class_getName(curCls), ivName, [dict.allKeys componentsJoinedByString:@","]];
-                        } else if ([val isKindOfClass:[NSArray class]]) {
-                            NSArray *arr = (NSArray *)val;
-                            [outLog appendFormat:@"%@• [%s] %@ (NSArray count=%lu first=%s)\n",
-                                indent, class_getName(curCls), ivName, (unsigned long)arr.count,
-                                arr.firstObject ? object_getClassName(arr.firstObject) : "nil"];
-                        } else if (![val isKindOfClass:[NSSet class]] && ![val isKindOfClass:[NSData class]]) {
-                            NSString *ivLC = ivName.lowercaseString;
-                            if ([ivLC containsString:@"delegate"] || [ivLC containsString:@"datasource"] ||
-                                [ivLC containsString:@"parent"] || [ivLC containsString:@"manager"] ||
-                                [ivLC containsString:@"table"] || [ivLC containsString:@"collection"]) {
-                                [outLog appendFormat:@"%@• [%s] %@ -> <%s: %p> (ref)\n",
-                                    indent, class_getName(curCls), ivName, object_getClassName(val), (__bridge void *)val];
-                            } else {
-                                [outLog appendFormat:@"%@• [%s] %@ -> <%s: %p>\n",
-                                    indent, class_getName(curCls), ivName, object_getClassName(val), (__bridge void *)val];
-                                ZXDumpObjectIvarsRecursive(val, depth + 1, maxDepth, outLog, visited);
-                            }
-                        }
-                    } @catch (__unused NSException *e) {}
-                } else {
-                    long long intVal = 0;
-                    if (ZXScannerSafeReadIntegerIvar(obj, ivars[i], &intVal) && intVal != 0) {
-                        NSString *ivLC = ivName.lowercaseString;
-                        if ([ivLC containsString:@"id"] || [ivLC containsString:@"type"] ||
-                            [ivLC containsString:@"section"] || [ivLC containsString:@"hidden"] ||
-                            (intVal >= 10000 && intVal <= 999999999999999LL)) {
-                            [outLog appendFormat:@"%@• [%s] %@ (%@) = %lld\n",
-                                indent, class_getName(curCls), ivName, ivEnc, intVal];
-                        }
+                if (!nameC || !encC || encC[0] != '@' || encC[1] == '?') continue;
+                @try {
+                    id val = ZXScannerSafeReadObjectIvar(obj, ivars[i]);
+                    if (!val) continue;
+                    if ([val isKindOfClass:[UIView class]] || [val isKindOfClass:[CALayer class]] ||
+                        [val isKindOfClass:[UIViewController class]] || [val isKindOfClass:[UIImage class]]) {
+                        continue;
                     }
-                }
+                    NSString *ivName = [NSString stringWithUTF8String:nameC];
+                    if ([val isKindOfClass:[NSString class]] || [val isKindOfClass:[NSNumber class]]) {
+                        [outLog appendFormat:@"%@• [%s] %@ = \"%@\"\n", indent, class_getName(curCls), ivName, val];
+                    } else if ([val isKindOfClass:[NSArray class]]) {
+                        [outLog appendFormat:@"%@• [%s] %@ (NSArray count=%lu)\n", indent, class_getName(curCls), ivName, (unsigned long)[(NSArray *)val count]];
+                    } else if (![val isKindOfClass:[NSSet class]] && ![val isKindOfClass:[NSData class]]) {
+                        [outLog appendFormat:@"%@• [%s] %@ -> <%s: %p>\n", indent, class_getName(curCls), ivName, object_getClassName(val), (__bridge void *)val];
+                        ZXDumpObjectIvarsRecursive(val, depth + 1, maxDepth, outLog, visited);
+                    }
+                } @catch (__unused NSException *e) {}
             }
             free(ivars);
         }
-
-        // Log @objc declared property names on Swift/ObjC classes at depth <= 2 for complete visibility
-        if (depth <= 2) {
-            unsigned int pCount = 0;
-            objc_property_t *props = class_copyPropertyList(curCls, &pCount);
-            if (props && pCount > 0) {
-                NSMutableArray<NSString *> *pList = [NSMutableArray array];
-                for (unsigned int p = 0; p < pCount; p++) {
-                    const char *pn = property_getName(props[p]);
-                    const char *pa = property_getAttributes(props[p]);
-                    if (pn && pa) {
-                        NSString *paStr = [NSString stringWithUTF8String:pa];
-                        NSString *shortAttr = [[paStr componentsSeparatedByString:@","] firstObject] ?: paStr;
-                        [pList addObject:[NSString stringWithFormat:@"%s(%@)", pn, shortAttr]];
-                    }
-                }
-                if (pList.count > 0) {
-                    [outLog appendFormat:@"%@  [Props %s]: %@\n",
-                        indent, class_getName(curCls), [pList componentsJoinedByString:@", "]];
-                }
-            }
-            if (props) free(props);
-        }
-
         curCls = class_getSuperclass(curCls);
-    }
-}
-
-static void ZXCollectZaloViewControllers(UIViewController *vc, NSMutableArray<UIViewController *> *outVCs, NSMutableSet<NSValue *> *seen)
-{
-    if (!vc) return;
-    NSValue *k = [NSValue valueWithPointer:(__bridge const void *)vc];
-    if ([seen containsObject:k]) return;
-    [seen addObject:k];
-
-    NSString *clsName = NSStringFromClass([vc class]);
-    if (![clsName hasPrefix:@"ZX"]) {
-        [outVCs addObject:vc];
-    }
-    for (UIViewController *child in vc.childViewControllers) {
-        ZXCollectZaloViewControllers(child, outVCs, seen);
-    }
-    if ([vc isKindOfClass:[UINavigationController class]]) {
-        for (UIViewController *sub in ((UINavigationController *)vc).viewControllers) {
-            ZXCollectZaloViewControllers(sub, outVCs, seen);
-        }
-    }
-    if ([vc isKindOfClass:[UITabBarController class]]) {
-        for (UIViewController *sub in ((UITabBarController *)vc).viewControllers) {
-            ZXCollectZaloViewControllers(sub, outVCs, seen);
-        }
-    }
-    if (vc.presentedViewController) {
-        ZXCollectZaloViewControllers(vc.presentedViewController, outVCs, seen);
-    }
-}
-
-static void ZXDumpListViewsInViewHierarchy(UIView *rootView, NSMutableString *log, NSMutableSet<NSValue *> *seenLists)
-{
-    if (!rootView || log.length > 180000) return;
-    NSMutableArray<UIView *> *queue = [NSMutableArray arrayWithObject:rootView];
-    while (queue.count > 0) {
-        UIView *v = queue.firstObject;
-        [queue removeObjectAtIndex:0];
-        if ([NSStringFromClass([v class]) hasPrefix:@"ZX"]) continue;
-
-        if ([v isKindOfClass:[UITableView class]]) {
-            NSValue *lk = [NSValue valueWithPointer:(__bridge const void *)v];
-            if (![seenLists containsObject:lk]) {
-                [seenLists addObject:lk];
-                UITableView *tv = (UITableView *)v;
-                [log appendFormat:@"\n[TABLEVIEW] %s | hidden=%d | sections=%ld | visibleCells=%lu\n  dataSource=%s | delegate=%s\n",
-                    object_getClassName(tv), tv.hidden, (long)tv.numberOfSections, (unsigned long)tv.visibleCells.count,
-                    tv.dataSource ? object_getClassName(tv.dataSource) : "nil",
-                    tv.delegate ? object_getClassName(tv.delegate) : "nil"];
-                if (tv.dataSource) {
-                    [log appendString:@"  [DataSource Ivars]:\n"];
-                    ZXDumpObjectIvarsRecursive(tv.dataSource, 2, 3, log, [NSMutableSet set]);
-                }
-                NSUInteger cellIdx = 0;
-                for (UITableViewCell *cell in tv.visibleCells) {
-                    if (++cellIdx > 12) break;
-                    NSIndexPath *ip = [tv indexPathForCell:cell];
-                    [log appendFormat:@"  [CELL sec=%ld row=%ld] Class=%s\n",
-                        (long)(ip ? ip.section : -1), (long)(ip ? ip.row : -1), object_getClassName(cell)];
-                    ZXDumpObjectIvarsRecursive(cell, 2, 4, log, [NSMutableSet set]);
-                }
-            }
-        } else if ([v isKindOfClass:[UICollectionView class]]) {
-            NSValue *lk = [NSValue valueWithPointer:(__bridge const void *)v];
-            if (![seenLists containsObject:lk]) {
-                [seenLists addObject:lk];
-                UICollectionView *cv = (UICollectionView *)v;
-                [log appendFormat:@"\n[COLLECTIONVIEW] %s | hidden=%d | sections=%ld | visibleCells=%lu\n  dataSource=%s | delegate=%s\n",
-                    object_getClassName(cv), cv.hidden, (long)cv.numberOfSections, (unsigned long)cv.visibleCells.count,
-                    cv.dataSource ? object_getClassName(cv.dataSource) : "nil",
-                    cv.delegate ? object_getClassName(cv.delegate) : "nil"];
-                if (cv.dataSource) {
-                    [log appendString:@"  [DataSource Ivars]:\n"];
-                    ZXDumpObjectIvarsRecursive(cv.dataSource, 2, 3, log, [NSMutableSet set]);
-                }
-                NSUInteger cellIdx = 0;
-                for (UICollectionViewCell *cell in cv.visibleCells) {
-                    if (++cellIdx > 12) break;
-                    NSIndexPath *ip = [cv indexPathForCell:cell];
-                    [log appendFormat:@"  [ITEM sec=%ld item=%ld] Class=%s\n",
-                        (long)(ip ? ip.section : -1), (long)(ip ? ip.item : -1), object_getClassName(cell)];
-                    ZXDumpObjectIvarsRecursive(cell, 2, 4, log, [NSMutableSet set]);
-                }
-            }
-        }
-        if (v.subviews.count > 0) {
-            [queue addObjectsFromArray:v.subviews];
-        }
     }
 }
 
@@ -821,21 +580,29 @@ static void ZXDumpListViewsInViewHierarchy(UIView *rootView, NSMutableString *lo
     return [[ZXConfig dataDir] stringByAppendingPathComponent:@"zx_resolved_profiles.json"];
 }
 
++ (NSSet<NSString *> *)discoveredOwnerUIDs
+{
+    NSMutableSet<NSString *> *owners = [NSMutableSet setWithArray:
+        ([[NSUserDefaults standardUserDefaults] arrayForKey:@"zx_owner_uids_v5"] ?: @[])];
+    NSString *cfgUID = [ZXConfig currentUserID];
+    if (cfgUID.length > 0) [owners addObject:cfgUID];
+    return owners;
+}
+
 + (NSDictionary<NSString *, NSString *> *)currentHiddenChatDigitToUIDMap
 {
-    NSMutableDictionary<NSString *, NSMutableDictionary *> *found = [NSMutableDictionary new];
+    NSMutableDictionary<NSString *, NSMutableDictionary *> *threads = [NSMutableDictionary new];
+    NSMutableSet<NSString *> *owners = [NSMutableSet setWithSet:[self discoveredOwnerUIDs]];
     NSMutableDictionary<NSString *, NSString *> *digitMap = [NSMutableDictionary new];
     @try {
-        NSArray<NSString *> *dbPaths = ZXAllZaloSQLitePaths();
-        for (NSString *path in dbPaths) {
-            ZXScanDatabaseForHiddenIDs(path, found);
+        for (NSString *path in ZXAllZaloSQLitePaths()) {
+            ZXScanHiddenChatEntityInDatabase(path, threads, owners, NULL);
         }
-        for (NSString *uid in found) {
-            NSString *digits = ZXExtractDigitCore(uid);
-            if (digits.length >= 4) {
-                digitMap[digits] = uid;
-            }
-            digitMap[uid] = uid;
+        for (NSString *tid in threads) {
+            if (ZXMatchesAnyOwnerUID(tid, owners)) continue;
+            NSString *digits = ZXExtractDigitCore(tid);
+            if (digits.length >= 4) digitMap[digits] = tid;
+            digitMap[tid] = tid;
         }
     } @catch (NSException *e) {
         ZXLog(@"currentHiddenChatDigitToUIDMap exception: %@", e.reason);
@@ -845,139 +612,135 @@ static void ZXDumpListViewsInViewHierarchy(UIView *rootView, NSMutableString *lo
 
 + (NSArray<NSString *> *)currentHiddenChatEntityIDs
 {
-    NSMutableDictionary<NSString *, NSMutableDictionary *> *found = [NSMutableDictionary new];
+    NSMutableDictionary<NSString *, NSMutableDictionary *> *threads = [NSMutableDictionary new];
+    NSMutableSet<NSString *> *owners = [NSMutableSet setWithSet:[self discoveredOwnerUIDs]];
     @try {
-        NSArray<NSString *> *dbPaths = ZXAllZaloSQLitePaths();
-        for (NSString *path in dbPaths) {
-            ZXScanDatabaseForHiddenIDs(path, found);
+        for (NSString *path in ZXAllZaloSQLitePaths()) {
+            ZXScanHiddenChatEntityInDatabase(path, threads, owners, NULL);
         }
     } @catch (NSException *e) {
         ZXLog(@"currentHiddenChatEntityIDs exception: %@", e.reason);
     }
-    return found.allKeys ?: @[];
+    return threads.allKeys ?: @[];
 }
 
 + (NSArray<NSDictionary *> *)scanSQLiteForHiddenChats
 {
-    NSMutableDictionary<NSString *, NSMutableDictionary *> *found = [NSMutableDictionary new];
+    NSMutableDictionary<NSString *, NSMutableDictionary *> *merged = [NSMutableDictionary new];
     @try {
         NSSet<NSString *> *dismissedKeys = [NSSet setWithArray:([[NSUserDefaults standardUserDefaults] arrayForKey:@"zx_dismissed_hidden_keys"] ?: @[])];
+        NSSet<NSString *> *unhiddenIDs = [NSSet setWithArray:([[NSUserDefaults standardUserDefaults] arrayForKey:@"nthe_unhidden_thread_ids"] ?: @[])];
+        NSMutableSet<NSString *> *ownerUIDs = [NSMutableSet setWithSet:[self discoveredOwnerUIDs]];
 
-        // 1. STRICT GROUND TRUTH S_hidden: ONLY IDs present in HiddenChatEntity (search/global.sqlite)
+        // 1. Scan HiddenChatEntity (via WAL-safe temp copy): collects ownerUIDs from `userid` and hidden `threadid`s
+        BOOL foundHiddenEntityTable = NO;
         NSArray<NSString *> *dbPaths = ZXAllZaloSQLitePaths();
         for (NSString *path in dbPaths) {
-            ZXScanDatabaseForHiddenIDs(path, found);
-        }
-        for (NSString *dk in dismissedKeys) {
-            [found removeObjectForKey:dk];
+            ZXScanHiddenChatEntityInDatabase(path, merged, ownerUIDs, &foundHiddenEntityTable);
         }
 
-        // Build exact S_hidden lookup map (digitCore -> canonicalUID)
-        NSMutableDictionary<NSString *, NSString *> *sHiddenDigitsToUID = [NSMutableDictionary new];
-        for (NSString *uid in found) {
-            NSString *dCore = ZXExtractDigitCore(uid);
-            if (dCore.length >= 4) sHiddenDigitsToUID[dCore] = uid;
-            sHiddenDigitsToUID[uid] = uid;
-        }
-
-        // 2. Load 1-to-1 resolved names from zx_resolved_profiles.json (purging any synthetic pin:/hide: or non-S_hidden entries)
-        NSMutableDictionary<NSString *, id> *ramProfiles = [NSMutableDictionary new];
-        NSString *primaryPath = [self resolvedProfilesPath];
-        for (NSString *p in ZXCandidateJSONPathsForName(@"zx_resolved_profiles.json")) {
-            NSData *d = [NSData dataWithContentsOfFile:p];
-            if (!d) continue;
-            id obj = [NSJSONSerialization JSONObjectWithData:d options:0 error:nil];
-            if ([obj isKindOfClass:[NSDictionary class]]) {
-                [ramProfiles addEntriesFromDictionary:(NSDictionary *)obj];
+        // Remove dismissed or explicitly unhidden IDs & ownerUIDs
+        for (NSString *tid in [merged allKeys]) {
+            if ([dismissedKeys containsObject:tid] || [unhiddenIDs containsObject:tid] || ZXMatchesAnyOwnerUID(tid, ownerUIDs)) {
+                [merged removeObjectForKey:tid];
             }
         }
 
-        BOOL cleanedProfiles = NO;
-        for (NSString *k in [ramProfiles allKeys]) {
-            if ([dismissedKeys containsObject:k] || [k hasPrefix:@"_"] || [k hasPrefix:@"pin:"] || [k hasPrefix:@"hide:"]) {
-                [ramProfiles removeObjectForKey:k];
-                cleanedProfiles = YES;
+        // Build digit-core index for SQLite threadIds so e.g. "g_330571633" and "330571633" merge cleanly without duplicating
+        NSMutableDictionary<NSString *, NSString *> *digitToCanonicalThreadID = [NSMutableDictionary new];
+        for (NSString *tid in merged) {
+            NSString *dCore = ZXExtractDigitCore(tid);
+            if (dCore.length >= 4) digitToCanonicalThreadID[dCore] = tid;
+            digitToCanonicalThreadID[tid] = tid;
+        }
+
+        // 2. Load verified v5 profiles (`schema_version == "v5_gs_hidden_model"` — auto-purges older schemas!)
+        NSDictionary<NSString *, NSDictionary *> *v5Profiles = ZXLoadVerifiedV5Profiles(ownerUIDs);
+        long long nowTs = (long long)[[NSDate date] timeIntervalSince1970];
+
+        // 3. Merge v5 profiles with HiddenChatEntity threadIds
+        for (NSString *pKey in v5Profiles) {
+            NSDictionary *prof = v5Profiles[pKey];
+            NSString *pTid = [[prof[@"threadId"] ?: prof[@"uid"] ?: pKey description] stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+            if (pTid.length == 0 || ZXMatchesAnyOwnerUID(pTid, ownerUIDs) ||
+                [dismissedKeys containsObject:pTid] || [unhiddenIDs containsObject:pTid]) {
                 continue;
             }
-            NSDictionary *prof = [ramProfiles[k] isKindOfClass:[NSDictionary class]] ? ramProfiles[k] : nil;
-            if (!prof) {
-                [ramProfiles removeObjectForKey:k];
-                cleanedProfiles = YES;
-                continue;
-            }
-            NSString *pName = [prof[@"name"] description] ?: @"";
-            if (pName.length > 0 && !ZXIsValidHumanDisplayName(pName, k)) {
-                [ramProfiles removeObjectForKey:k];
-                cleanedProfiles = YES;
-                continue;
-            }
-            // Purge non-hidden accounts if S_hidden is non-empty and this key isn't in S_hidden
-            NSString *kDigits = ZXExtractDigitCore(k);
-            if (found.count > 0 && !sHiddenDigitsToUID[k] && !(kDigits.length >= 4 && sHiddenDigitsToUID[kDigits])) {
-                [ramProfiles removeObjectForKey:k];
-                cleanedProfiles = YES;
-            }
-        }
-        if (cleanedProfiles && primaryPath.length > 0) {
-            NSData *cleanOut = [NSJSONSerialization dataWithJSONObject:ramProfiles options:0 error:nil];
-            if (cleanOut) [cleanOut writeToFile:primaryPath atomically:YES];
-        }
+            NSString *dName = [[prof[@"displayName"] ?: prof[@"name"] ?: @"" description] stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+            if (!ZXIsValidHumanDisplayName(dName, pTid)) continue;
+            NSString *sub = [[prof[@"subtitle"] ?: @"" description] stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+            if (ZXIsSystemClassOrEmpty(sub)) sub = @"";
 
-        // 3. Strictly 1-to-1 overlay: match ONLY exact uid or exact digitCore for uid ∈ S_hidden (NEVER blind-pair!)
-        for (NSString *uid in found) {
-            NSMutableDictionary *entry = found[uid];
-            NSString *dCore = ZXExtractDigitCore(uid);
-            NSDictionary *prof = [ramProfiles[uid] isKindOfClass:[NSDictionary class]] ? ramProfiles[uid] : nil;
-            if (!prof && dCore.length >= 4 && [ramProfiles[dCore] isKindOfClass:[NSDictionary class]]) {
-                prof = ramProfiles[dCore];
-            }
-            if (prof) {
-                NSString *pName = [prof[@"name"] description] ?: @"";
-                NSString *pMsg = [prof[@"lastMessage"] description] ?: @"";
-                if (ZXIsValidHumanDisplayName(pName, uid)) {
-                    entry[@"rawName"] = pName;
-                    entry[@"modelVerified"] = @([prof[@"modelVerified"] boolValue]);
-                }
-                if (pMsg.length > 0 && !ZXIsSystemClassOrEmpty(pMsg)) {
-                    entry[@"lastMessage"] = pMsg;
+            NSString *pDigits = ZXExtractDigitCore(pTid);
+            NSString *matchedSQLThread = digitToCanonicalThreadID[pTid] ?: (pDigits.length >= 4 ? digitToCanonicalThreadID[pDigits] : nil);
+
+            if (matchedSQLThread) {
+                NSMutableDictionary *entry = merged[matchedSQLThread];
+                entry[@"rawName"] = dName;
+                entry[@"subtitle"] = sub;
+                entry[@"resolved"] = @YES;
+            } else {
+                // If HiddenChatEntity table exists on disk, only include a standalone v5 entry if it was just captured (< 30s) or table wasn't found,
+                // otherwise if HiddenChatEntity was read and doesn't contain pTid, check if user unhid it in Zalo
+                long long updated = [prof[@"updatedAt"] longLongValue];
+                if (!foundHiddenEntityTable || (nowTs - updated) <= 30 || merged.count == 0) {
+                    merged[pTid] = [NSMutableDictionary dictionaryWithDictionary:@{
+                        @"uid": pTid,
+                        @"threadId": pTid,
+                        @"threadType": prof[@"threadType"] ?: @0,
+                        @"rawName": dName,
+                        @"subtitle": sub,
+                        @"resolved": @YES,
+                        @"updatedAt": @(updated > 0 ? updated : nowTs)
+                    }];
+                    if (pDigits.length >= 4) digitToCanonicalThreadID[pDigits] = pTid;
+                    digitToCanonicalThreadID[pTid] = pTid;
                 }
             }
         }
 
-        // 4. Format exact S_hidden list: 1 row per HiddenChatEntity ID
-        NSMutableArray<NSDictionary *> *finalList = [NSMutableArray arrayWithCapacity:found.count];
-        NSArray<NSString *> *sortedUIDs = [found.allKeys sortedArrayUsingSelector:@selector(compare:)];
-        for (NSString *uid in sortedUIDs) {
-            NSMutableDictionary *entry = found[uid];
+        // 4. Build final output list sorted cleanly (resolved names first, then unresolved threadIds)
+        NSMutableArray<NSDictionary *> *finalList = [NSMutableArray arrayWithCapacity:merged.count];
+        NSArray<NSString *> *sortedKeys = [merged.allKeys sortedArrayUsingSelector:@selector(compare:)];
+        for (NSString *tid in sortedKeys) {
+            if (ZXMatchesAnyOwnerUID(tid, ownerUIDs)) continue;
+            NSDictionary *entry = merged[tid];
             NSString *rawName = entry[@"rawName"] ?: @"";
-            if (rawName.length > 0 && !ZXIsValidHumanDisplayName(rawName, uid)) {
-                rawName = @"";
-            }
-            NSString *displayTitle = rawName.length > 0
-                ? [NSString stringWithFormat:@"%@ (ID: %@)", rawName, uid]
-                : [NSString stringWithFormat:@"Chưa giải mã tên (ID: %@)", uid];
+            BOOL hasName = ZXIsValidHumanDisplayName(rawName, tid);
+            if (!hasName) rawName = @"";
 
-            NSString *lastMsg = entry[@"lastMessage"] ?: @"";
-            if (lastMsg.length == 0) {
-                NSString *src = entry[@"sourceTable"] ?: @"HiddenChatEntity";
-                lastMsg = rawName.length > 0
-                    ? [NSString stringWithFormat:@"Khớp 1-1 Model • %@", src]
-                    : [NSString stringWithFormat:@"%@ • Nhập mã PIN ẩn ở Tìm kiếm Zalo để tự bắt tên 1-1", src];
-            }
+            NSString *subtitle = entry[@"subtitle"] ?: @"";
+            NSString *displayTitle = hasName
+                ? rawName
+                : [NSString stringWithFormat:@"Hội thoại ẩn (ID: %@)", tid];
+            NSString *detailLine = hasName
+                ? (subtitle.length > 0
+                    ? [NSString stringWithFormat:@"ID: %@ • GlobalSearchLogic • %@", tid, subtitle]
+                    : [NSString stringWithFormat:@"ID: %@ • GlobalSearchLogic", tid])
+                : @"Gõ mã PIN ẩn 1 lần trên thanh Tìm kiếm Zalo để tự động hiện đủ 100% tên thật";
+
             [finalList addObject:@{
-                @"uid": uid,
+                @"uid": tid,
+                @"threadId": tid,
+                @"threadType": entry[@"threadType"] ?: @0,
                 @"rawName": rawName,
                 @"name": displayTitle,
-                @"lastMessage": lastMsg,
-                @"hiddenSource": @"HiddenChatEntity",
-                @"verified": @(rawName.length > 0),
-                @"modelVerified": @([entry[@"modelVerified"] boolValue]),
+                @"subtitle": subtitle,
+                @"lastMessage": detailLine,
+                @"hiddenSource": hasName ? @"GlobalSearchLogic" : @"HiddenChatEntity",
+                @"verified": @(hasName),
+                @"modelVerified": @(hasName),
                 @"updatedAt": entry[@"updatedAt"] ?: @0
             }];
         }
 
-        ZXLog(@"S_hidden scan complete: %lu DBs -> %lu strict HiddenChatEntity rows",
-              (unsigned long)dbPaths.count, (unsigned long)finalList.count);
+        [finalList sortUsingComparator:^NSComparisonResult(NSDictionary *a, NSDictionary *b) {
+            BOOL va = [a[@"verified"] boolValue];
+            BOOL vb = [b[@"verified"] boolValue];
+            if (va != vb) return va ? NSOrderedAscending : NSOrderedDescending;
+            return [(a[@"name"] ?: @"") localizedCaseInsensitiveCompare:(b[@"name"] ?: @"")];
+        }];
+
         return finalList;
     } @catch (NSException *e) {
         ZXLog(@"scanSQLiteForHiddenChats exception: %@", e.reason);
@@ -990,21 +753,11 @@ static void ZXDumpListViewsInViewHierarchy(UIView *rootView, NSMutableString *lo
     if (![NSThread isMainThread]) return @"";
     NSMutableString *log = [NSMutableString string];
     @try {
-        NSMutableSet<NSValue *> *seenVCs = [NSMutableSet set];
-        NSMutableSet<NSValue *> *seenLists = [NSMutableSet set];
-        NSArray<UIWindow *> *wins = ZXScannerAllSceneWindows();
-        for (UIWindow *win in wins) {
+        for (UIWindow *win in ZXScannerAllSceneWindows()) {
             if ([NSStringFromClass([win class]) hasPrefix:@"ZX"]) continue;
-            NSMutableArray<UIViewController *> *vcs = [NSMutableArray array];
-            if (win.rootViewController) {
-                ZXCollectZaloViewControllers(win.rootViewController, vcs, seenVCs);
-            }
-            for (UIViewController *vc in vcs) {
-                if (vc.isViewLoaded && vc.view) {
-                    ZXDumpListViewsInViewHierarchy(vc.view, log, seenLists);
-                }
-            }
-            ZXDumpListViewsInViewHierarchy(win, log, seenLists);
+            [log appendFormat:@"Window: %s key=%d hidden=%d rootVC=%s\n",
+                object_getClassName(win), win.isKeyWindow, win.hidden,
+                win.rootViewController ? object_getClassName(win.rootViewController) : "nil"];
         }
     } @catch (__unused NSException *e) {}
     return log;
@@ -1013,135 +766,23 @@ static void ZXDumpListViewsInViewHierarchy(UIView *rootView, NSMutableString *lo
 + (NSString *)runHiddenIntrospectionWithPinSnapshot:(NSString *)pinSnapshot liveSceneDump:(NSString *)liveSceneDump
 {
     NSMutableString *log = [NSMutableString stringWithFormat:
-        @"=== ZALO 26.11.02.1 HIDDEN CHAT & MODEL INTROSPECTION ===\nBundleID: %@\nTime: %@\n\n",
-        [[NSBundle mainBundle] bundleIdentifier] ?: @"?", [NSDate date]];
+        @"=== ZALO 26.11.02.1 v5_gs_hidden_model DIAGNOSTICS ===\nBundleID: %@\nOwnerUIDs: %@\nTime: %@\n\n",
+        [[NSBundle mainBundle] bundleIdentifier] ?: @"?",
+        [[self discoveredOwnerUIDs].allObjects componentsJoinedByString:@","],
+        [NSDate date]];
 
     @try {
-        // [PHẦN 1] Exact HiddenChatEntity SQLite Schema & Raw Rows
-        [log appendString:@"==========================================================\n"];
-        [log appendString:@"[PHẦN 1] SCHEMA & DỮ LIỆU GỐC BẢNG HiddenChatEntity (SQLite)\n"];
-        [log appendString:@"==========================================================\n"];
-        NSArray<NSString *> *dbPaths = ZXAllZaloSQLitePaths();
-        [log appendFormat:@"Total SQLite files discovered in Sandbox: %lu\n", (unsigned long)dbPaths.count];
-        for (NSString *dbPath in dbPaths) {
-            sqlite3 *db = NULL;
-            if (sqlite3_open_v2(dbPath.UTF8String, &db, SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX, NULL) != SQLITE_OK || !db) {
-                if (db) sqlite3_close(db);
-                continue;
-            }
-            sqlite3_busy_timeout(db, 150);
-            sqlite3_stmt *tStmt = NULL;
-            if (sqlite3_prepare_v2(db, "SELECT name, sql FROM sqlite_master WHERE type='table'", -1, &tStmt, NULL) == SQLITE_OK) {
-                while (sqlite3_step(tStmt) == SQLITE_ROW) {
-                    NSString *tName = ZXColumnText(tStmt, 0);
-                    NSString *tSQL = ZXColumnText(tStmt, 1);
-                    NSString *tlc = tName.lowercaseString;
-                    if ([tlc containsString:@"hidden"] || [tlc containsString:@"hide"] || [tlc containsString:@"pin"]) {
-                        [log appendFormat:@"\nDB: %@\nTable: %@\nDDL: %@\n", dbPath, tName, tSQL];
-                        NSString *q = [NSString stringWithFormat:@"SELECT * FROM \"%@\" LIMIT 50", tName];
-                        sqlite3_stmt *rStmt = NULL;
-                        if (sqlite3_prepare_v2(db, q.UTF8String, -1, &rStmt, NULL) == SQLITE_OK) {
-                            int cols = sqlite3_column_count(rStmt);
-                            int rowIdx = 0;
-                            while (sqlite3_step(rStmt) == SQLITE_ROW) {
-                                NSMutableArray<NSString *> *pairs = [NSMutableArray array];
-                                for (int c = 0; c < cols; c++) {
-                                    const char *cn = sqlite3_column_name(rStmt, c);
-                                    [pairs addObject:[NSString stringWithFormat:@"%s='%@'", cn ?: "?", ZXColumnScalarString(rStmt, c)]];
-                                }
-                                [log appendFormat:@"  Row[%d]: %@\n", rowIdx++, [pairs componentsJoinedByString:@" | "]];
-                            }
-                            sqlite3_finalize(rStmt);
-                        }
-                    }
-                }
-            }
-            if (tStmt) sqlite3_finalize(tStmt);
-            sqlite3_close(db);
+        [log appendString:@"[1] HiddenChatEntity (WAL-safe Temp Copy):\n"];
+        NSArray<NSDictionary *> *rows = [self scanSQLiteForHiddenChats];
+        for (NSDictionary *r in rows) {
+            [log appendFormat:@"  • threadId=%@ | name='%@' | verified=%@ | source=%@\n",
+                r[@"threadId"], r[@"rawName"], r[@"verified"], r[@"hiddenSource"]];
         }
-
-        // [PHẦN 2] Snapshot Cell Backing Models captured when typing 4-6 digit PIN in Search
-        [log appendString:@"\n==========================================================\n"];
-        [log appendString:@"[PHẦN 2] SNAPSHOT CELL BACKING MODELS KHI NHẬP MÃ PIN TÌM KIẾM\n"];
-        [log appendString:@"==========================================================\n"];
-        NSString *snapText = pinSnapshot;
-        if (snapText.length == 0) {
-            snapText = [NSString stringWithContentsOfFile:[self lastPinCellsDumpPath] encoding:NSUTF8StringEncoding error:nil];
+        if (pinSnapshot.length > 0) {
+            [log appendFormat:@"\n[2] GlobalSearchLogic Capture Log:\n%@\n", pinSnapshot];
         }
-        if (snapText.length > 0) {
-            [log appendString:snapText];
-            [log appendString:@"\n"];
-        } else {
-            [log appendString:@"(Chưa có snapshot PIN — Hãy ra ô Tìm kiếm Zalo gõ mã PIN ẩn ví dụ '1206' để hiện kết quả rồi bấm Dump lại!)\n"];
-        }
-
-        // [PHẦN 3] Live UITableView / UICollectionView Backing Models (captured on Main Thread, zero dispatch_sync!)
-        [log appendString:@"\n==========================================================\n"];
-        [log appendString:@"[PHẦN 3] LIVE TABLEVIEW / COLLECTIONVIEW TRONG BỘ NHỚ HIỆN TẠI\n"];
-        [log appendString:@"==========================================================\n"];
         if (liveSceneDump.length > 0) {
-            [log appendString:liveSceneDump];
-            [log appendString:@"\n"];
-        } else {
-            [log appendString:@"(Không có TableView/CollectionView nào đang mở)\n"];
-        }
-
-        // [PHẦN 4] Zalo Binary Classes & Selectors for HiddenChat / ContactManager / Thread / Search
-        [log appendString:@"\n==========================================================\n"];
-        [log appendString:@"[PHẦN 4] ZALO 26.11.02.1 CLASSES & METHODS (MANAGER / MODEL / SEARCH)\n"];
-        [log appendString:@"==========================================================\n"];
-        NSArray<NSString *> *clsKeywords = @[
-            @"HiddenChat", @"HideChat", @"PinChat", @"SecretChat",
-            @"ContactManager", @"ProfileManager", @"GroupManager",
-            @"ConversationManager", @"ThreadManager", @"ChatDataManager",
-            @"GlobalSearch", @"SearchSection", @"SearchResult"
-        ];
-        unsigned int clsCount = 0;
-        Class *allClasses = objc_copyClassList(&clsCount);
-        if (allClasses) {
-            NSUInteger dumpedClasses = 0;
-            for (unsigned int i = 0; i < clsCount && dumpedClasses < 120; i++) {
-                Class cls = allClasses[i];
-                if (!ZXIsZaloBinaryClass(cls)) continue;
-                const char *rawName = class_getName(cls);
-                if (!rawName) continue;
-                NSString *clsName = [NSString stringWithUTF8String:rawName];
-                BOOL hit = NO;
-                for (NSString *kw in clsKeywords) {
-                    if ([clsName rangeOfString:kw options:NSCaseInsensitiveSearch].location != NSNotFound) {
-                        hit = YES;
-                        break;
-                    }
-                }
-                if (!hit) continue;
-                dumpedClasses++;
-
-                Class sup = class_getSuperclass(cls);
-                [log appendFormat:@"\n[CLASS] %@ : %s\n", clsName, sup ? class_getName(sup) : "nil"];
-
-                unsigned int cmCount = 0;
-                Method *cMethods = class_copyMethodList(object_getClass(cls), &cmCount);
-                if (cMethods) {
-                    for (unsigned int m = 0; m < cmCount && m < 40; m++) {
-                        char *rt = method_copyReturnType(cMethods[m]);
-                        [log appendFormat:@"  + (%s)%s\n", rt ?: "?", sel_getName(method_getName(cMethods[m]))];
-                        if (rt) free(rt);
-                    }
-                    free(cMethods);
-                }
-
-                unsigned int imCount = 0;
-                Method *iMethods = class_copyMethodList(cls, &imCount);
-                if (iMethods) {
-                    for (unsigned int m = 0; m < imCount && m < 60; m++) {
-                        char *rt = method_copyReturnType(iMethods[m]);
-                        [log appendFormat:@"  - (%s)%s\n", rt ?: "?", sel_getName(method_getName(iMethods[m]))];
-                        if (rt) free(rt);
-                    }
-                    free(iMethods);
-                }
-            }
-            free(allClasses);
+            [log appendFormat:@"\n[3] Active Windows:\n%@\n", liveSceneDump];
         }
     } @catch (NSException *e) {
         [log appendFormat:@"\n[EXCEPTION] %@\n", e.reason];
@@ -1157,11 +798,17 @@ static void ZXDumpListViewsInViewHierarchy(UIView *rootView, NSMutableString *lo
     if (!chatID || chatID.length == 0) return NO;
     BOOL modifiedAny = NO;
     @try {
+        NSSet<NSString *> *owners = [self discoveredOwnerUIDs];
+        if (ZXMatchesAnyOwnerUID(chatID, owners)) return NO;
+
         NSString *cleanDigits = ZXExtractDigitCore(chatID);
         BOOL isNumeric = (cleanDigits.length >= 4 && [cleanDigits isEqualToString:chatID]);
 
-        NSArray<NSString *> *dbPaths = ZXAllZaloSQLitePaths();
-        for (NSString *dbPath in dbPaths) {
+        for (NSString *dbPath in ZXAllZaloSQLitePaths()) {
+            NSString *lcPath = dbPath.lowercaseString;
+            if (![lcPath containsString:@"global"] && ![lcPath containsString:@"search"] && ![lcPath containsString:@"hidden"]) {
+                continue;
+            }
             sqlite3 *db = NULL;
             if (sqlite3_open_v2(dbPath.UTF8String, &db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_NOMUTEX, NULL) != SQLITE_OK || !db) {
                 if (db) sqlite3_close(db);
@@ -1169,67 +816,13 @@ static void ZXDumpListViewsInViewHierarchy(UIView *rootView, NSMutableString *lo
             }
             sqlite3_busy_timeout(db, 300);
 
-            NSMutableArray<NSString *> *tables = [NSMutableArray new];
-            sqlite3_stmt *tStmt = NULL;
-            if (sqlite3_prepare_v2(db, "SELECT name FROM sqlite_master WHERE type='table'", -1, &tStmt, NULL) == SQLITE_OK) {
-                while (sqlite3_step(tStmt) == SQLITE_ROW) {
-                    NSString *tName = ZXColumnText(tStmt, 0);
-                    if (tName.length && ![tName hasPrefix:@"sqlite_"]) [tables addObject:tName];
-                }
-            }
-            if (tStmt) sqlite3_finalize(tStmt);
-
-            for (NSString *table in tables) {
-                NSString *tlc = table.lowercaseString;
-                BOOL isDedicatedHiddenTable = ([tlc containsString:@"hiddenchat"] || [tlc containsString:@"hidechat"] || [tlc isEqualToString:@"hidden_chats"]);
-
-                NSString *pragma = [NSString stringWithFormat:@"PRAGMA table_info(\"%@\")", table];
-                sqlite3_stmt *cStmt = NULL;
-                if (sqlite3_prepare_v2(db, pragma.UTF8String, -1, &cStmt, NULL) != SQLITE_OK) {
-                    if (cStmt) sqlite3_finalize(cStmt);
-                    continue;
-                }
-                NSMutableArray<NSString *> *idCols = [NSMutableArray new];
-                NSMutableArray<NSString *> *hideCols = [NSMutableArray new];
-                while (sqlite3_step(cStmt) == SQLITE_ROW) {
-                    NSString *col = ZXColumnText(cStmt, 1);
-                    if (!col.length) continue;
-                    NSString *lc = col.lowercaseString;
-                    if (ZXIsExactEntityIDColumn(col) || (isDedicatedHiddenTable && ZXIsPreferredHiddenIDColumn(col))) {
-                        [idCols addObject:col];
-                    }
-                    if ([lc containsString:@"hidden"] || [lc containsString:@"hide"] || [lc isEqualToString:@"is_pin"]) {
-                        if (![lc containsString:@"time"] && ![lc containsString:@"date"] && ![lc containsString:@"stamp"]) {
-                            [hideCols addObject:col];
-                        }
-                    }
-                }
-                sqlite3_finalize(cStmt);
-
-                if (idCols.count == 0) continue;
-                NSMutableArray<NSString *> *whereParts = [NSMutableArray new];
-                for (NSString *ic in idCols) {
-                    [whereParts addObject:[NSString stringWithFormat:@"\"%@\" = '%@'", ic, chatID]];
-                    if (isNumeric) {
-                        [whereParts addObject:[NSString stringWithFormat:@"\"%@\" = %@", ic, cleanDigits]];
-                    }
-                }
-                NSString *whereSQL = [whereParts componentsJoinedByString:@" OR "];
-
-                if (isDedicatedHiddenTable) {
-                    NSString *delSQL = [NSString stringWithFormat:@"DELETE FROM \"%@\" WHERE %@", table, whereSQL];
-                    if (sqlite3_exec(db, delSQL.UTF8String, NULL, NULL, NULL) == SQLITE_OK && sqlite3_changes(db) > 0) {
-                        modifiedAny = YES;
-                    }
-                }
-                if (hideCols.count > 0) {
-                    for (NSString *hc in hideCols) {
-                        NSString *updSQL = [NSString stringWithFormat:@"UPDATE \"%@\" SET \"%@\" = 0 WHERE %@", table, hc, whereSQL];
-                        if (sqlite3_exec(db, updSQL.UTF8String, NULL, NULL, NULL) == SQLITE_OK && sqlite3_changes(db) > 0) {
-                            modifiedAny = YES;
-                        }
-                    }
-                }
+            // Strictly delete ONLY by `threadid` (NEVER by `userid`!)
+            NSString *delSQL = isNumeric
+                ? [NSString stringWithFormat:@"DELETE FROM HiddenChatEntity WHERE threadid = '%@' OR threadid = %@;", chatID, cleanDigits]
+                : [NSString stringWithFormat:@"DELETE FROM HiddenChatEntity WHERE threadid = '%@';",
+                   [chatID stringByReplacingOccurrencesOfString:@"'" withString:@"''"]];
+            if (sqlite3_exec(db, delSQL.UTF8String, NULL, NULL, NULL) == SQLITE_OK && sqlite3_changes(db) > 0) {
+                modifiedAny = YES;
             }
             sqlite3_close(db);
         }

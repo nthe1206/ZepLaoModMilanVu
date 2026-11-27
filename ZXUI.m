@@ -523,25 +523,11 @@ static void ZXHookBubbleShow(void)
 }
 - (void)onClearWrongNamesTapped
 {
-    UIAlertController *confirm = [UIAlertController alertControllerWithTitle:@"Làm sạch danh sách Trò chuyện ẩn"
-                                                                     message:@"Chọn thao tác làm sạch dữ liệu ẩn trên thiết bị:"
-                                                              preferredStyle:UIAlertControllerStyleActionSheet];
-    if (@available(iOS 13.0, *)) confirm.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
-    [confirm addAction:[UIAlertAction actionWithTitle:@"🔍 Chỉ lọc bỏ mục thừa (giữ tên đã xác thực)" style:UIAlertActionStyleDefault handler:^(UIAlertAction *act) {
-        (void)act;
-        [ZXHookEngine pruneAndRescanHiddenChats];
-        [self reloadChats];
-        ZXShowToast(self.navigationController.view ?: self.view, @"Đã lọc sạch các cuộc trò chuyện bình thường");
-    }]];
-    [confirm addAction:[UIAlertAction actionWithTitle:@"🗑️ Xóa toàn bộ cache tên & Quét lại từ đầu" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *act) {
-        (void)act;
+    dispatch_async(dispatch_get_main_queue(), ^{
         [ZXHookEngine clearResolvedNamesCache];
         [self reloadChats];
-        ZXShowToast(self.navigationController.view ?: self.view, @"Đã xóa sạch zx_resolved_profiles.json & quét lại");
-    }]];
-    [confirm addAction:[UIAlertAction actionWithTitle:@"Hủy" style:UIAlertActionStyleCancel handler:nil]];
-    confirm.popoverPresentationController.sourceView = self.tableView.tableHeaderView ?: self.view;
-    [self presentViewController:confirm animated:YES completion:nil];
+        ZXShowToast(self.navigationController.view ?: self.view, @"Đã xóa sạch zx_resolved_profiles.json & tải lại danh sách");
+    });
 }
 - (void)dealloc
 {
@@ -557,20 +543,22 @@ static void ZXHookBubbleShow(void)
     void (^updateUI)(void) = ^{
         self.chats = [ZXHookEngine discoveredHiddenChats] ?: @[];
         [self.tableView reloadData];
-        ZXShowToast(self.navigationController.view ?: self.view,
-                    [NSString stringWithFormat:@"Quét hoàn tất: %lu hội thoại ẩn", (unsigned long)self.chats.count]);
     };
     if ([NSThread isMainThread]) updateUI();
     else dispatch_async(dispatch_get_main_queue(), updateUI);
 }
 - (void)reloadChats
 {
-    self.chats = [ZXHookEngine discoveredHiddenChats] ?: @[];
-    [self.tableView reloadData];
+    void (^doReload)(void) = ^{
+        self.chats = [ZXHookEngine discoveredHiddenChats] ?: @[];
+        [self.tableView reloadData];
+    };
+    if ([NSThread isMainThread]) doReload();
+    else dispatch_async(dispatch_get_main_queue(), doReload);
 }
 - (void)rescanAndReload
 {
-    ZXShowToast(self.navigationController.view ?: self.view, @"Đang quét lại HiddenChatEntity & gộp dữ liệu ẩn...");
+    ZXShowToast(self.navigationController.view ?: self.view, @"Đang quét lại HiddenChatEntity & cache v5...");
     [ZXHookEngine scanMemoryForHiddenChats];
 }
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section
@@ -593,21 +581,25 @@ static void ZXHookBubbleShow(void)
     }
     if (self.chats.count == 0) {
         cell.textLabel.text = @"Chưa phát hiện cuộc trò chuyện ẩn nào";
-        cell.detailTextLabel.text = @"Bấm nút 'Quét lại' ở góc phải để quét cơ sở dữ liệu SQLite của Zalo.";
+        cell.detailTextLabel.text = @"Gõ mã PIN ẩn 1 lần trên thanh Tìm kiếm Zalo hoặc bấm 'Quét lại' ở góc phải.";
         cell.accessoryType = UITableViewCellAccessoryNone;
         return cell;
     }
     NSDictionary *c = self.chats[indexPath.row];
-    NSString *uid = [c[@"uid"] description] ?: @"?";
+    NSString *uid = [c[@"threadId"] ?: c[@"uid"] description] ?: @"?";
     NSString *rawName = [c[@"rawName"] description] ?: @"";
-    BOOL modelVerified = [c[@"modelVerified"] boolValue];
-    NSString *srcBadge = modelVerified ? @"Khớp 1-1 Model" : @"HiddenChatEntity";
+    NSString *subtitle = [c[@"subtitle"] description] ?: @"";
     BOOL hasRealName = [ZXScanner isValidHumanDisplayName:rawName excludeUID:uid];
-    NSString *titleText = hasRealName
-        ? [NSString stringWithFormat:@"%@ (ID: %@)", rawName, uid]
-        : [NSString stringWithFormat:@"Chưa giải mã tên (ID: %@)", uid];
-    cell.textLabel.text = titleText;
-    cell.detailTextLabel.text = [NSString stringWithFormat:@"[%@] • %@", srcBadge, c[@"lastMessage"] ?: @"(Trống)"];
+
+    if (hasRealName) {
+        cell.textLabel.text = rawName;
+        cell.detailTextLabel.text = subtitle.length > 0
+            ? [NSString stringWithFormat:@"ID: %@ • GlobalSearchLogic • %@", uid, subtitle]
+            : [NSString stringWithFormat:@"ID: %@ • GlobalSearchLogic", uid];
+    } else {
+        cell.textLabel.text = [NSString stringWithFormat:@"Hội thoại ẩn (ID: %@)", uid];
+        cell.detailTextLabel.text = @"Gõ mã PIN ẩn 1 lần trên thanh Tìm kiếm Zalo để tự động hiện đủ 100% tên thật";
+    }
     cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
     return cell;
 }
@@ -620,7 +612,7 @@ static void ZXHookBubbleShow(void)
 {
     if (row < 0 || row >= (NSInteger)self.chats.count) return;
     NSDictionary *c = self.chats[(NSUInteger)row];
-    NSString *uid = [c[@"uid"] description] ?: @"";
+    NSString *uid = [c[@"threadId"] ?: c[@"uid"] description] ?: @"";
     if (uid.length == 0) return;
     [ZXHookEngine removeHiddenChatEntryWithID:uid];
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -654,41 +646,40 @@ static void ZXHookBubbleShow(void)
     [tableView deselectRowAtIndexPath:indexPath animated:YES];
     if (self.chats.count == 0) return;
     NSDictionary *c = self.chats[indexPath.row];
-    NSString *uid = [c[@"uid"] description] ?: @"";
+    NSString *uid = [c[@"threadId"] ?: c[@"uid"] description] ?: @"";
     NSString *rawName = [c[@"rawName"] description] ?: @"";
     BOOL hasRealName = [ZXScanner isValidHumanDisplayName:rawName excludeUID:uid];
-    BOOL isSyntheticUID = ([uid hasPrefix:@"pin:"] || [uid hasPrefix:@"hide:"]);
-    // STRICT RULE: NEVER pass numeric uid or "Hội thoại ẩn..." placeholder as a search name!
     NSString *verifiedRealName = hasRealName ? rawName : @"";
-    NSString *sheetTitle = hasRealName
-        ? (isSyntheticUID ? rawName : [NSString stringWithFormat:@"%@ (ID: %@)", rawName, uid])
-        : [NSString stringWithFormat:@"Hội thoại ẩn (ID: %@)", uid];
+    NSString *sheetTitle = hasRealName ? rawName : [NSString stringWithFormat:@"Hội thoại ẩn (ID: %@)", uid];
+    NSString *sheetMsg = [NSString stringWithFormat:@"ID: %@ • GlobalSearchLogic", uid];
 
     UIAlertController *sheet = [UIAlertController alertControllerWithTitle:sheetTitle
-                                                                   message:[NSString stringWithFormat:@"%@", c[@"lastMessage"] ?: @""]
+                                                                   message:sheetMsg
                                                             preferredStyle:UIAlertControllerStyleActionSheet];
     if (@available(iOS 13.0, *)) sheet.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
     [sheet addAction:[UIAlertAction actionWithTitle:@"💬 Mở thẳng khung chat" style:UIAlertActionStyleDefault handler:^(UIAlertAction *act) {
         (void)act;
         dispatch_async(dispatch_get_main_queue(), ^{
             @try {
-                // Walk presentingViewController chain to the root-most host so ALL thanhthe popups close cleanly
+                // Close entire thanhthe modal stack back to Zalo's root ViewController on main_queue
+                UIWindow *keyWin = ZXKeyWindow();
                 UIViewController *rootPresenter = self;
                 while (rootPresenter.presentingViewController) {
                     rootPresenter = rootPresenter.presentingViewController;
                 }
-                UIWindow *keyWin = ZXKeyWindow();
                 if (!rootPresenter && keyWin.rootViewController) {
                     rootPresenter = keyWin.rootViewController;
                 }
                 void (^afterDismiss)(void) = ^{
-                    @try {
-                        [ZXBubble show];
-                        ZXRefreshFloatingBubbleNow();
-                        [ZXHookEngine openChatWithID:uid displayName:verifiedRealName];
-                    } @catch (NSException *ex) {
-                        ZXLog(@"openChatWithID afterDismiss exception: %@", ex.reason);
-                    }
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        @try {
+                            [ZXBubble show];
+                            ZXRefreshFloatingBubbleNow();
+                            [ZXHookEngine openChatWithID:uid displayName:verifiedRealName];
+                        } @catch (NSException *ex) {
+                            ZXLog(@"openChatWithID afterDismiss exception: %@", ex.reason);
+                        }
+                    });
                 };
                 if (rootPresenter.presentedViewController) {
                     [rootPresenter dismissViewControllerAnimated:YES completion:afterDismiss];
@@ -700,29 +691,19 @@ static void ZXHookBubbleShow(void)
             }
         });
     }]];
-    if (!isSyntheticUID) {
-        [sheet addAction:[UIAlertAction actionWithTitle:@"👁️ Bỏ ẩn nhanh hội thoại này" style:UIAlertActionStyleDefault handler:^(UIAlertAction *act) {
-            (void)act;
-            [ZXHookEngine unhideChatWithID:uid];
-            [self reloadChats];
-            ZXShowToast(self.navigationController.view ?: self.view,
-                        [NSString stringWithFormat:@"Đã bỏ ẩn %@ & cập nhật danh sách Tin nhắn", (hasRealName ? rawName : sheetTitle)]);
-        }]];
-    }
+    [sheet addAction:[UIAlertAction actionWithTitle:@"👁️ Bỏ ẩn nhanh hội thoại này" style:UIAlertActionStyleDefault handler:^(UIAlertAction *act) {
+        (void)act;
+        [ZXHookEngine unhideChatWithID:uid];
+        [self reloadChats];
+        ZXShowToast(self.navigationController.view ?: self.view,
+                    [NSString stringWithFormat:@"Đã bỏ ẩn %@ & cập nhật danh sách Tin nhắn", sheetTitle]);
+    }]];
     if (hasRealName) {
         [sheet addAction:[UIAlertAction actionWithTitle:@"📋 Sao chép Tên thật" style:UIAlertActionStyleDefault handler:^(UIAlertAction *act) {
             (void)act;
             [UIPasteboard generalPasteboard].string = verifiedRealName;
             ZXShowToast(self.navigationController.view ?: self.view, @"Đã sao chép tên thật vào bộ nhớ tạm");
         }]];
-        if (!isSyntheticUID) {
-            [sheet addAction:[UIAlertAction actionWithTitle:@"🧹 Xóa tên bị gán sai của ID này" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *act) {
-                (void)act;
-                [ZXHookEngine clearResolvedNameForID:uid];
-                [self reloadChats];
-                ZXShowToast(self.navigationController.view ?: self.view, @"Đã xóa tên cũ của hội thoại này");
-            }]];
-        }
     }
     [sheet addAction:[UIAlertAction actionWithTitle:@"🗑️ Xóa dòng này khỏi danh sách" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *act) {
         (void)act;
